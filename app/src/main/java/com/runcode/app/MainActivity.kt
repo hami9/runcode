@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -102,6 +103,13 @@ fun MainApp(viewModel: MainViewModel) {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+    }
+
+    // Battery-optimisation state and free memory change while the user is away in
+    // Settings, so re-read them every time the app returns to the foreground.
+    LifecycleResumeEffect(Unit) {
+        viewModel.refreshCapabilities()
+        onPauseOrDispose { }
     }
 
     LaunchedEffect(userMessage) {

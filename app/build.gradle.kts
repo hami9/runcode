@@ -94,6 +94,17 @@ android {
 chaquopy {
     defaultConfig {
         version = "3.12"
+
+        // pip runs on the build machine, not the device, and Chaquopy needs a matching
+        // CPython 3.12 to run it. Point RUNCODE_BUILD_PYTHON at one if it is not on PATH.
+        System.getenv("RUNCODE_BUILD_PYTHON")?.let { buildPython(it) }
+
+        // Wheels are resolved at build time and packaged into the APK; there is no pip on
+        // the device. Anything a project imports has to be listed here.
+        pip {
+            install("python-telegram-bot==21.9")
+            install("requests==2.32.3")
+        }
     }
 }
 

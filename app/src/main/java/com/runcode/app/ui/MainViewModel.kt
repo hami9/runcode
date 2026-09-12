@@ -101,6 +101,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _mcpAllowLan = MutableStateFlow(false)
     val mcpAllowLan: StateFlow<Boolean> = _mcpAllowLan.asStateFlow()
 
+    private val _lastCrash = MutableStateFlow(app.lastCrashReport())
+    val lastCrash: StateFlow<String?> = _lastCrash.asStateFlow()
+
     val isPythonAvailable: Boolean = app.isPythonAvailable
     val pythonVersion: String = if (app.isPythonAvailable) PythonEngine.pythonVersion() else "unavailable"
 
@@ -165,6 +168,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun mcpLanAddress(): String = app.portManager.getLanIp()
+
+    fun dismissCrashReport() {
+        app.clearCrashReport()
+        _lastCrash.value = null
+    }
 
     fun loadProjects() {
         viewModelScope.launch {

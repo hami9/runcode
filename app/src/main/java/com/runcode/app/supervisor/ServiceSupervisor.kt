@@ -223,6 +223,23 @@ class ServiceSupervisor(
                     break
                 }
 
+                ExitReason.FATAL -> {
+                    // A syntax error or a missing module fails the same way every time, so
+                    // retrying just flaps the service. Stop and say why.
+                    logManager.log(
+                        project.id,
+                        project.name,
+                        LogLevel.ERROR,
+                        "Service cannot start as configured. Restart policy skipped — fix the code and run it again."
+                    )
+                    releaseService(project.id)
+                    updateInstance(project.id) {
+                        it.copy(state = ServiceState.FAILED, lastError = "Cannot start: fix the script and retry")
+                    }
+                    syncSystemState()
+                    break
+                }
+
                 ExitReason.CRASHED, ExitReason.RUNNING -> {
                     logManager.log(project.id, project.name, LogLevel.WARN, "Service process exited unexpectedly.")
 

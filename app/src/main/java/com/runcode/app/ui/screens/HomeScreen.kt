@@ -304,7 +304,8 @@ fun HomeScreen(
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Port: ${inst.port} • Uptime: ${inst.uptimeSeconds}s • RAM: ${inst.memoryEstimateMb}MB",
+                                text = "Port: ${inst.port} • Uptime: ${inst.uptimeSeconds}s • RAM: ${inst.memoryLabel}MB",
+                                maxLines = 1,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
                                 color = TextMuted

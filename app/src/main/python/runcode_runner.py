@@ -124,6 +124,13 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
         if code in (None, 0):
             return "completed"
         return "failed:SystemExit: {}".format(code)
+    except (SyntaxError, ModuleNotFoundError) as load_error:
+        # The script cannot be loaded at all. Restarting it would fail identically
+        # every time, so report it as fatal and let the supervisor stop trying.
+        for line in traceback.format_exc().rstrip().split("\n"):
+            sink.onOutput("stderr", line)
+        summary = traceback.format_exception_only(type(load_error), load_error)[-1].strip()
+        return "fatal:{}".format(summary)
     except BaseException:
         for line in traceback.format_exc().rstrip().split("\n"):
             sink.onOutput("stderr", line)

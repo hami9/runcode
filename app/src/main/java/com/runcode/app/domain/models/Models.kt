@@ -79,6 +79,10 @@ data class RuntimeInstance(
     val cpuEstimatePercent: Int = 0
 ) {
     val isRunning: Boolean get() = state == ServiceState.RUNNING || state == ServiceState.DEGRADED
+
+    /** Memory rounded for display; the raw Double rendered as 17.93731689453125MB. */
+    val memoryLabel: String
+        get() = String.format(java.util.Locale.US, "%.1f", memoryEstimateMb)
     val uptimeSeconds: Long
         get() = if (startTime > 0 && isRunning) (System.currentTimeMillis() - startTime) / 1000 else 0L
 }

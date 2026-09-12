@@ -18,6 +18,7 @@ import com.runcode.app.security.SecretStore
 import com.runcode.app.storage.ProjectStorage
 import com.runcode.app.supervisor.ServiceSupervisor
 import com.runcode.app.system.CompatibilityManager
+import com.runcode.app.system.CrashReporter
 import com.runcode.app.terminal.TerminalSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +58,9 @@ class RuncodeApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // Install first: a crash during the rest of startup is exactly the one worth keeping.
+        CrashReporter.install(this)
 
         projectStorage = ProjectStorage(this)
         portManager = PortManager()
@@ -145,6 +149,10 @@ class RuncodeApp : Application() {
             )
         }
     }
+
+    fun lastCrashReport(): String? = CrashReporter.lastCrash(this)
+
+    fun clearCrashReport() = CrashReporter.clear(this)
 
     private companion object {
         const val MCP_TOKEN_KEY = "MCP_BRIDGE_TOKEN"

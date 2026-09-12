@@ -52,6 +52,11 @@ enum class ExitReason {
     COMPLETED,
     /** The workload threw, or the runtime died unexpectedly. */
     CRASHED,
+    /**
+     * The workload cannot start at all: a syntax error, a missing module. Restarting it
+     * would fail identically every time, so the supervisor must not retry.
+     */
+    FATAL,
     /** Shut down on request. */
     STOPPED
 }

@@ -195,6 +195,11 @@ fun HealthScreen(
             }
         }
 
+        // Last crash, if the app died since it was last opened
+        item {
+            CrashReportCard(viewModel)
+        }
+
         // MCP Bridge
         item {
             McpBridgeCard(viewModel)
@@ -255,6 +260,63 @@ fun HealthScreen(
                         status = "Not available",
                         isOk = false
                     )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Android's crash dialog says only "Something went wrong", and the stack trace lives in
+ * logcat where a phone user cannot reach it. Show it here instead.
+ */
+@Composable
+private fun CrashReportCard(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    val crash by viewModel.lastCrash.collectAsState()
+    val report = crash ?: return
+    var expanded by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, AccentRed.copy(alpha = 0.5f))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Last crash", fontWeight = FontWeight.Bold, color = AccentRed, fontSize = 14.sp)
+            Text(
+                text = report.lineSequence().take(6).joinToString("\n"),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+                color = TextSecondary
+            )
+
+            if (expanded) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = report,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    lineHeight = 13.sp,
+                    color = TextMuted
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "Collapse" else "Show full trace", fontSize = 11.sp, color = AccentCyan)
+                }
+                TextButton(onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("runcode_crash", report))
+                }) {
+                    Text("Copy", fontSize = 11.sp, color = AccentCyan)
+                }
+                TextButton(onClick = { viewModel.dismissCrashReport() }) {
+                    Text("Dismiss", fontSize = 11.sp, color = TextMuted)
                 }
             }
         }

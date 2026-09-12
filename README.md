@@ -14,8 +14,17 @@ client drive the whole thing.
 ```
 
 Requires JDK 21 and the Android SDK (compileSdk 36). Put your SDK path in `local.properties`
-(Android Studio writes it for you). The APK is around 50 MB because it ships CPython for
-`arm64-v8a` and `x86_64`.
+(Android Studio writes it for you).
+
+Third-party Python packages are resolved by pip **at build time**, which needs a local
+CPython 3.12 on the build machine. If it is not on `PATH`, point at it:
+
+```bash
+RUNCODE_BUILD_PYTHON=/path/to/python3.12 ./gradlew assembleDebug
+```
+
+The APK is large — CPython plus the bundled wheels, for `arm64-v8a` and `x86_64`. Trim
+`abiFilters` to one ABI to roughly halve it.
 
 ## What actually runs
 
@@ -25,7 +34,7 @@ Requires JDK 21 and the Android SDK (compileSdk 36). Put your SDK path in `local
 | Static web server | Raw-socket HTTP/1.1 file server |
 | SQLite browser | Android platform SQLite |
 | Shell | `/system/bin/sh` in the app sandbox — no root, no PTY, no job control |
-| pip packages | Not enabled; needs a build-time requirements list in `chaquopy { }` |
+| Bundled packages | `python-telegram-bot` 21.9, `requests` — add more to the `pip` block in `app/build.gradle.kts` |
 | JavaScript / PHP | Not implemented |
 
 Python scripts run as `__main__` with the project directory as the working directory, so

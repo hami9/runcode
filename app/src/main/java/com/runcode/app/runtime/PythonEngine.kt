@@ -117,7 +117,11 @@ class PythonEngine(
                     sink.onEvent(LogLevel.SYSTEM, "Python process stopped.")
                     reason.set(ExitReason.STOPPED)
                 }
-                else -> {
+                else -> if (outcome.startsWith("fatal:")) {
+                    sink.onEvent(LogLevel.ERROR, "--- Python Execution Failed: ${outcome.removePrefix("fatal:")} ---")
+                    sink.onEvent(LogLevel.ERROR, "The script cannot start as written, so it will not be retried.")
+                    reason.compareAndSet(ExitReason.RUNNING, ExitReason.FATAL)
+                } else {
                     sink.onEvent(LogLevel.ERROR, "--- Python Execution Failed: ${outcome.removePrefix("failed:")} ---")
                     reason.compareAndSet(ExitReason.RUNNING, ExitReason.CRASHED)
                 }

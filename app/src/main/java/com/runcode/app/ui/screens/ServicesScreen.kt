@@ -356,7 +356,7 @@ fun InstanceSupervisorCard(
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Port: ${instance.port} • Uptime: ${instance.uptimeSeconds}s • RAM: ${instance.memoryEstimateMb}MB • Restarts: ${instance.restartCount}",
+                    text = "Port: ${instance.port} • Uptime: ${instance.uptimeSeconds}s • RAM: ${instance.memoryLabel}MB • Restarts: ${instance.restartCount}",
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     color = TextSecondary
