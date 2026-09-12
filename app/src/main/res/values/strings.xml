@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">runcode</string>
+    <string name="app_description">Native Android Local Runtime, IDE &amp; Service Host</string>
+    <string name="tab_home">Home</string>
+    <string name="tab_projects">Projects</string>
+    <string name="tab_editor">Editor</string>
+    <string name="tab_services">Services</string>
+    <string name="tab_database">Database</string>
+    <string name="tab_backups">Backups</string>
+    <string name="tab_health">Health</string>
+    <string name="action_run">Run</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_restart">Restart</string>
+    <string name="action_new_project">New Project</string>
+    <string name="action_import">Import</string>
+    <string name="action_save">Save</string>
+    <string name="notification_channel_name">runcode Active Services</string>
+    <string name="notification_channel_desc">Shows status of active local runtimes and servers</string>
+</resources>
