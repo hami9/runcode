@@ -43,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -159,33 +160,50 @@ fun BackupsScreen(
                         border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column {
-                                    Text(file.name, fontWeight = FontWeight.Bold, color = TextPrimary)
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text("Size: $sizeKb KB • Created: $dateStr", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = TextMuted)
-                                }
+                            // Filename and buttons stacked rather than side by side: a long
+                            // .rcpkg name used to squeeze the actions until "Verify" wrapped
+                            // one letter per line and "Restore" fell off the screen entirely.
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = file.name,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Size: $sizeKb KB • Created: $dateStr",
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    color = TextMuted
+                                )
 
-                                Row {
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
                                     OutlinedButton(
                                         onClick = { viewModel.verifyBackup(file) },
                                         shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.testTag("verify_backup_${file.name}")
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("verify_backup_${file.name}")
                                     ) {
-                                        Text("Verify", color = AccentCyan)
+                                        Text("Verify", color = AccentCyan, maxLines = 1)
                                     }
-                                    Spacer(modifier = Modifier.width(6.dp))
                                     Button(
                                         onClick = { fileToRestore = file },
                                         colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
                                         shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.testTag("restore_backup_${file.name}")
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("restore_backup_${file.name}")
                                     ) {
-                                        Text("Restore", color = Color.Black, fontWeight = FontWeight.Bold)
+                                        Text("Restore", color = Color.Black, fontWeight = FontWeight.Bold, maxLines = 1)
                                     }
                                 }
                             }
@@ -221,6 +239,12 @@ fun BackupsScreen(
                             fontWeight = FontWeight.Bold,
                             color = if (prev.isValid) AccentGreen else AccentRed
                         )
+                    }
+
+                    // A failed verification with no reason on screen is useless; show why.
+                    prev.error?.let { reason ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(reason, fontSize = 11.sp, color = AccentRed, lineHeight = 16.sp)
                     }
 
                     prev.manifest?.let { man ->

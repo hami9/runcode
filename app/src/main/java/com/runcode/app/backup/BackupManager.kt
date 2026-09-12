@@ -114,15 +114,39 @@ class BackupManager(
                 val manifest = parseManifest(manifestJson)
 
                 val fileList = mutableListOf<String>()
+                val payloadEntries = mutableListOf<ZipEntry>()
                 val entries = zip.entries()
                 while (entries.hasMoreElements()) {
                     val e = entries.nextElement()
-                    if (e.name.contains("..")) {
+                    if (e.name.split('/').any { it == ".." }) {
                         return@withContext BackupPreview(isValid = false, manifest = null, fileList = emptyList(), error = "Zip-Slip attempt detected: ${e.name}")
                     }
                     if (!e.isDirectory && e.name != "manifest.json") {
                         fileList.add(e.name.removePrefix("payload/"))
+                        payloadEntries.add(e)
                     }
+                }
+
+                // The UI promises the checksum is verified before restore, so actually verify
+                // it: hash the payload in the same order it was written and compare.
+                val actualChecksum = payloadChecksum(zip, payloadEntries)
+                if (manifest.checksum.isNotEmpty() && !actualChecksum.equals(manifest.checksum, ignoreCase = true)) {
+                    return@withContext BackupPreview(
+                        isValid = false,
+                        manifest = manifest,
+                        fileList = fileList,
+                        error = "Checksum mismatch: archive contents do not match the manifest. " +
+                            "Expected ${manifest.checksum.take(12)}…, got ${actualChecksum.take(12)}…"
+                    )
+                }
+
+                if (manifest.fileCount != 0 && manifest.fileCount != payloadEntries.size) {
+                    return@withContext BackupPreview(
+                        isValid = false,
+                        manifest = manifest,
+                        fileList = fileList,
+                        error = "File count mismatch: manifest says ${manifest.fileCount}, archive holds ${payloadEntries.size}"
+                    )
                 }
 
                 BackupPreview(
@@ -206,6 +230,25 @@ class BackupManager(
         } finally {
             stagingDir.deleteRecursively()
         }
+    }
+
+    /**
+     * Hashes the payload the same way [createProjectBackup] did: every payload entry in
+     * archive order, which is the order it was written in.
+     */
+    private fun payloadChecksum(zip: ZipFile, entries: List<ZipEntry>): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(8192)
+        entries.forEach { entry ->
+            zip.getInputStream(entry).use { input ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun parseManifest(json: String): BackupManifest {

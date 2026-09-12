@@ -43,10 +43,18 @@ android {
         // builds — the release APK simply comes out unsigned in that case.
         if (releaseStorePath != null) {
             create("release") {
+                val store = signingValue("storePassword", "RUNCODE_KEYSTORE_PASSWORD")
                 storeFile = file(releaseStorePath)
-                storePassword = signingValue("storePassword", "RUNCODE_KEYSTORE_PASSWORD")
+                storePassword = store
                 keyAlias = signingValue("keyAlias", "RUNCODE_KEY_ALIAS")
-                keyPassword = signingValue("keyPassword", "RUNCODE_KEY_PASSWORD")
+                // PKCS12 keystores — what keytool produces by default since JDK 9 — have no
+                // separate key password, so fall back to the store password when none is given.
+                keyPassword = signingValue("keyPassword", "RUNCODE_KEY_PASSWORD") ?: store
+
+                // v2 alone is enough to install on minSdk 26, but v3 is what makes key
+                // rotation possible later, and it costs nothing to include now.
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }

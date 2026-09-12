@@ -90,3 +90,7 @@ app/src/main/java/com/runcode/app/
 app/src/main/python/
   runcode_runner.py   stdout/stderr bridge, cooperative stop, snippet runner
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
