@@ -21,3 +21,6 @@ captures/
 # OS
 .DS_Store
 Thumbs.db
+
+# Release signing material
+keystore.properties

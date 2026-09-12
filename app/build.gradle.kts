@@ -1,9 +1,23 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin")
     id("com.chaquo.python")
 }
+
+// Release signing material never lives in the repo. Supply it either through an untracked
+// keystore.properties next to the root build file, or through environment variables in CI.
+val keystoreProperties = Properties().apply {
+    val file = rootProject.file("keystore.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun signingValue(key: String, envName: String): String? =
+    keystoreProperties.getProperty(key) ?: System.getenv(envName)
+
+val releaseStorePath: String? = signingValue("storeFile", "RUNCODE_KEYSTORE")
 
 android {
     namespace = "com.runcode.app"
@@ -24,8 +38,22 @@ android {
         }
     }
 
+    signingConfigs {
+        // Registered only when signing material is actually present, so a plain clone still
+        // builds — the release APK simply comes out unsigned in that case.
+        if (releaseStorePath != null) {
+            create("release") {
+                storeFile = file(releaseStorePath)
+                storePassword = signingValue("storePassword", "RUNCODE_KEYSTORE_PASSWORD")
+                keyAlias = signingValue("keyAlias", "RUNCODE_KEY_ALIAS")
+                keyPassword = signingValue("keyPassword", "RUNCODE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
