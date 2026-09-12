@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Exclude-only ruleset: everything not listed here is still transferred.
+    The vault SharedPreferences must never leave the device in either flow.
+-->
 <data-extraction-rules>
     <cloud-backup>
-        <include domain="sharedpref" path="." />
+        <exclude domain="sharedpref" path="runcode_vault.xml" />
         <exclude domain="database" path="." />
         <exclude domain="file" path="projects/" />
-        <exclude domain="file" path="secrets/" />
     </cloud-backup>
     <device-transfer>
-        <include domain="sharedpref" path="." />
-        <exclude domain="file" path="secrets/" />
+        <exclude domain="sharedpref" path="runcode_vault.xml" />
     </device-transfer>
 </data-extraction-rules>

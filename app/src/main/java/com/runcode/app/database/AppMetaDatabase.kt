@@ -2,6 +2,7 @@ package com.runcode.app.database
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.runcode.app.domain.models.EnvironmentVariable
@@ -11,11 +12,14 @@ import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.domain.models.RestartPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
-class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_meta.db", null, 1) {
+class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_meta.db", null, DB_VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE projects (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -28,23 +32,35 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
                 allow_lan INTEGER DEFAULT 0,
                 restart_policy TEXT DEFAULT 'ON_FAILURE',
                 start_on_boot INTEGER DEFAULT 0,
+                environment TEXT DEFAULT '[]',
+                arguments TEXT DEFAULT '[]',
+                working_directory TEXT DEFAULT '',
                 created_at INTEGER,
                 updated_at INTEGER
             );
-        """.trimIndent())
+            """.trimIndent()
+        )
 
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE recent_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 opened_at INTEGER NOT NULL
             );
-        """.trimIndent())
+            """.trimIndent()
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Future migrations
+        if (oldVersion < 2) {
+            // v1 dropped environment/arguments/workingDirectory on the floor, so a bot token
+            // configured before a restart was silently lost.
+            db.execSQL("ALTER TABLE projects ADD COLUMN environment TEXT DEFAULT '[]'")
+            db.execSQL("ALTER TABLE projects ADD COLUMN arguments TEXT DEFAULT '[]'")
+            db.execSQL("ALTER TABLE projects ADD COLUMN working_directory TEXT DEFAULT ''")
+        }
     }
 
     suspend fun insertOrUpdateProject(project: Project) = withContext(Dispatchers.IO) {
@@ -60,6 +76,9 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
             put("allow_lan", if (project.network.allowLan) 1 else 0)
             put("restart_policy", project.restartPolicy.name)
             put("start_on_boot", if (project.startOnBoot) 1 else 0)
+            put("environment", encodeEnvironment(project.environment))
+            put("arguments", encodeArguments(project.arguments))
+            put("working_directory", project.workingDirectory)
             put("created_at", project.createdAt)
             put("updated_at", System.currentTimeMillis())
         }
@@ -70,41 +89,107 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
         val list = mutableListOf<Project>()
         readableDatabase.rawQuery("SELECT * FROM projects ORDER BY updated_at DESC", null).use { cursor ->
             while (cursor.moveToNext()) {
-                val profileStr = cursor.getString(cursor.getColumnIndexOrThrow("profile"))
-                val profile = ProjectProfile.entries.find { it.id == profileStr } ?: ProjectProfile.PYTHON_SCRIPT
-                val policyStr = cursor.getString(cursor.getColumnIndexOrThrow("restart_policy"))
-                val policy = try { RestartPolicy.valueOf(policyStr) } catch (_: Exception) { RestartPolicy.ON_FAILURE }
-
-                list.add(
-                    Project(
-                        id = cursor.getString(cursor.getColumnIndexOrThrow("id")),
-                        name = cursor.getString(cursor.getColumnIndexOrThrow("name")),
-                        description = cursor.getString(cursor.getColumnIndexOrThrow("description")),
-                        profile = profile,
-                        projectRoot = cursor.getString(cursor.getColumnIndexOrThrow("project_root")),
-                        entryPoint = cursor.getString(cursor.getColumnIndexOrThrow("entry_point")),
-                        network = NetworkConfig(
-                            port = cursor.getInt(cursor.getColumnIndexOrThrow("port")),
-                            bindAddress = cursor.getString(cursor.getColumnIndexOrThrow("bind_address")),
-                            allowLan = cursor.getInt(cursor.getColumnIndexOrThrow("allow_lan")) == 1
-                        ),
-                        restartPolicy = policy,
-                        startOnBoot = cursor.getInt(cursor.getColumnIndexOrThrow("start_on_boot")) == 1,
-                        createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
-                        updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at"))
-                    )
-                )
+                list.add(readProject(cursor))
             }
         }
         list
     }
 
     suspend fun getProjectById(id: String): Project? = withContext(Dispatchers.IO) {
-        getAllProjects().find { it.id == id }
+        readableDatabase.rawQuery("SELECT * FROM projects WHERE id = ? LIMIT 1", arrayOf(id)).use { cursor ->
+            if (cursor.moveToFirst()) readProject(cursor) else null
+        }
     }
 
     suspend fun deleteProject(id: String) = withContext(Dispatchers.IO) {
         writableDatabase.delete("projects", "id = ?", arrayOf(id))
         writableDatabase.delete("recent_files", "project_id = ?", arrayOf(id))
+    }
+
+    private fun readProject(cursor: Cursor): Project {
+        val profileStr = cursor.getString(cursor.getColumnIndexOrThrow("profile"))
+        val profile = ProjectProfile.entries.find { it.id == profileStr } ?: ProjectProfile.PYTHON_SCRIPT
+        val policyStr = cursor.getString(cursor.getColumnIndexOrThrow("restart_policy"))
+        val policy = try {
+            RestartPolicy.valueOf(policyStr)
+        } catch (_: Exception) {
+            RestartPolicy.ON_FAILURE
+        }
+
+        return Project(
+            id = cursor.getString(cursor.getColumnIndexOrThrow("id")),
+            name = cursor.getString(cursor.getColumnIndexOrThrow("name")),
+            description = cursor.getString(cursor.getColumnIndexOrThrow("description")),
+            profile = profile,
+            projectRoot = cursor.getString(cursor.getColumnIndexOrThrow("project_root")),
+            entryPoint = cursor.getString(cursor.getColumnIndexOrThrow("entry_point")),
+            arguments = decodeArguments(cursor.getStringOrNull("arguments")),
+            environment = decodeEnvironment(cursor.getStringOrNull("environment")),
+            workingDirectory = cursor.getStringOrNull("working_directory") ?: "",
+            network = NetworkConfig(
+                port = cursor.getInt(cursor.getColumnIndexOrThrow("port")),
+                bindAddress = cursor.getString(cursor.getColumnIndexOrThrow("bind_address")),
+                allowLan = cursor.getInt(cursor.getColumnIndexOrThrow("allow_lan")) == 1
+            ),
+            restartPolicy = policy,
+            startOnBoot = cursor.getInt(cursor.getColumnIndexOrThrow("start_on_boot")) == 1,
+            createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
+            updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at"))
+        )
+    }
+
+    private fun Cursor.getStringOrNull(column: String): String? {
+        val index = getColumnIndex(column)
+        return if (index >= 0 && !isNull(index)) getString(index) else null
+    }
+
+    private fun encodeEnvironment(environment: List<EnvironmentVariable>): String {
+        val array = JSONArray()
+        environment.forEach { variable ->
+            array.put(
+                JSONObject()
+                    .put("key", variable.key)
+                    .put("value", variable.value)
+                    .put("isSecret", variable.isSecret)
+            )
+        }
+        return array.toString()
+    }
+
+    private fun decodeEnvironment(raw: String?): List<EnvironmentVariable> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val array = JSONArray(raw)
+            (0 until array.length()).mapNotNull { index ->
+                val obj = array.optJSONObject(index) ?: return@mapNotNull null
+                EnvironmentVariable(
+                    key = obj.optString("key"),
+                    value = obj.optString("value"),
+                    isSecret = obj.optBoolean("isSecret", false)
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun encodeArguments(arguments: List<String>): String {
+        val array = JSONArray()
+        arguments.forEach { array.put(it) }
+        return array.toString()
+    }
+
+    private fun decodeArguments(raw: String?): List<String> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return try {
+            val array = JSONArray(raw)
+            (0 until array.length()).map { array.optString(it) }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private companion object {
+        const val DB_VERSION = 2
     }
 }

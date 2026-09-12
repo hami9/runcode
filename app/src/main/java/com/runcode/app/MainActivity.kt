@@ -10,16 +10,26 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -30,7 +40,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -46,15 +58,13 @@ import com.runcode.app.ui.screens.HealthScreen
 import com.runcode.app.ui.screens.HomeScreen
 import com.runcode.app.ui.screens.ProjectsScreen
 import com.runcode.app.ui.screens.ServicesScreen
+import com.runcode.app.ui.screens.TerminalScreen
 import com.runcode.app.ui.theme.AccentCyan
 import com.runcode.app.ui.theme.AccentGreen
 import com.runcode.app.ui.theme.DarkBg
-import com.runcode.app.ui.theme.DarkBorder
 import com.runcode.app.ui.theme.DarkSurface
 import com.runcode.app.ui.theme.RuncodeTheme
 import com.runcode.app.ui.theme.TextMuted
-import com.runcode.app.ui.theme.TextPrimary
-import com.runcode.app.ui.theme.TextSecondary
 
 class MainActivity : ComponentActivity() {
 
@@ -104,57 +114,11 @@ fun MainApp(viewModel: MainViewModel) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            NavigationBar(
-                containerColor = DarkSurface,
-                tonalElevation = 4.dp
-            ) {
-                val navItems = listOf(
-                    Screen.HOME,
-                    Screen.PROJECTS,
-                    Screen.EDITOR,
-                    Screen.SERVICES,
-                    Screen.DATABASE,
-                    Screen.BACKUPS,
-                    Screen.HEALTH
-                )
-
-                navItems.forEach { screen ->
-                    val isSelected = currentScreen == screen
-                    NavigationBarItem(
-                        selected = isSelected,
-                        onClick = { currentScreen = screen },
-                        icon = {
-                            if (screen == Screen.SERVICES && runningCount > 0) {
-                                BadgedBox(
-                                    badge = {
-                                        Badge(containerColor = AccentGreen) {
-                                            Text(runningCount.toString(), color = Color.Black)
-                                        }
-                                    }
-                                ) {
-                                    Icon(screen.icon, contentDescription = screen.title)
-                                }
-                            } else {
-                                Icon(screen.icon, contentDescription = screen.title)
-                            }
-                        },
-                        label = {
-                            Text(
-                                text = screen.title,
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Default
-                            )
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = AccentCyan,
-                            selectedTextColor = AccentCyan,
-                            indicatorColor = AccentCyan.copy(alpha = 0.15f),
-                            unselectedIconColor = TextMuted,
-                            unselectedTextColor = TextMuted
-                        )
-                    )
-                }
-            }
+            RuncodeBottomBar(
+                current = currentScreen,
+                runningCount = runningCount,
+                onSelect = { currentScreen = it }
+            )
         },
         containerColor = DarkBg
     ) { innerPadding ->
@@ -168,10 +132,76 @@ fun MainApp(viewModel: MainViewModel) {
                 Screen.HOME -> HomeScreen(viewModel = viewModel, onNavigate = { currentScreen = it })
                 Screen.PROJECTS -> ProjectsScreen(viewModel = viewModel, onNavigate = { currentScreen = it })
                 Screen.EDITOR -> EditorScreen(viewModel = viewModel)
+                Screen.TERMINAL -> TerminalScreen(viewModel = viewModel)
                 Screen.SERVICES -> ServicesScreen(viewModel = viewModel)
                 Screen.DATABASE -> DatabaseScreen(viewModel = viewModel)
                 Screen.BACKUPS -> BackupsScreen(viewModel = viewModel)
                 Screen.HEALTH -> HealthScreen(viewModel = viewModel)
+            }
+        }
+    }
+}
+
+/**
+ * Eight destinations do not fit a phone width. Material's NavigationBar distributes its items
+ * with weights, which collapses under the infinite width a horizontal scroll hands it, so the
+ * bar is laid out by hand instead: fixed-width items in a scrolling row.
+ */
+@Composable
+private fun RuncodeBottomBar(
+    current: Screen,
+    runningCount: Int,
+    onSelect: (Screen) -> Unit
+) {
+    Surface(color = DarkSurface, tonalElevation = 4.dp) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .horizontalScroll(rememberScrollState())
+                .padding(vertical = 8.dp)
+        ) {
+            Screen.entries.forEach { screen ->
+                val isSelected = current == screen
+                val tint = if (isSelected) AccentCyan else TextMuted
+
+                Column(
+                    modifier = Modifier
+                        .width(80.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onSelect(screen) }
+                        .padding(vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (isSelected) AccentCyan.copy(alpha = 0.15f) else Color.Transparent)
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        if (screen == Screen.SERVICES && runningCount > 0) {
+                            BadgedBox(
+                                badge = {
+                                    Badge(containerColor = AccentGreen) {
+                                        Text(runningCount.toString(), color = Color.Black)
+                                    }
+                                }
+                            ) {
+                                Icon(screen.icon, contentDescription = screen.title, tint = tint, modifier = Modifier.size(22.dp))
+                            }
+                        } else {
+                            Icon(screen.icon, contentDescription = screen.title, tint = tint, modifier = Modifier.size(22.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = screen.title,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        fontFamily = FontFamily.Default,
+                        color = tint
+                    )
+                }
             }
         }
     }

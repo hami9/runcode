@@ -1,0 +1,23 @@
+# Gradle / Kotlin
+.gradle/
+.kotlin/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android / IDE
+local.properties
+*.iml
+.idea/
+.cxx/
+captures/
+
+# Signing material — never commit keystores
+*.jks
+*.keystore
+
+# Secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db

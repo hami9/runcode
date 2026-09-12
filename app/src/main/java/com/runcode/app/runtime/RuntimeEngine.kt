@@ -41,11 +41,27 @@ interface RuntimeEventSink {
     fun onEvent(level: LogLevel, message: String)
 }
 
+/**
+ * Why a runtime is no longer alive. The supervisor uses this to tell a script that ran to
+ * completion apart from one that died, so a successful one-shot run is not reported as a crash.
+ */
+enum class ExitReason {
+    /** Still running. */
+    RUNNING,
+    /** The workload finished on its own without error. */
+    COMPLETED,
+    /** The workload threw, or the runtime died unexpectedly. */
+    CRASHED,
+    /** Shut down on request. */
+    STOPPED
+}
+
 interface RuntimeHandle {
     val serviceId: String
     val projectId: String
     val isAlive: Boolean
     val boundPort: Int
+    val exitReason: ExitReason
     suspend fun stop()
     suspend fun forceKill()
     suspend fun checkHealth(): RuntimeHealth

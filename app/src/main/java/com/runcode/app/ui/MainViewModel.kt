@@ -12,7 +12,10 @@ import com.runcode.app.domain.models.QueryResult
 import com.runcode.app.domain.models.RuntimeEvent
 import com.runcode.app.domain.models.RuntimeInstance
 import com.runcode.app.domain.models.TableInfo
+import com.runcode.app.mcp.McpServerState
+import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.storage.FileNode
+import com.runcode.app.terminal.TerminalLine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -84,6 +87,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _capabilities = MutableStateFlow<DeviceCapabilities?>(null)
     val capabilities: StateFlow<DeviceCapabilities?> = _capabilities.asStateFlow()
 
+    // Terminal
+    val terminalLines: StateFlow<List<TerminalLine>> = app.terminalSession.lines
+    val terminalRunning: StateFlow<Boolean> = app.terminalSession.isRunning
+    val terminalWorkingDir: StateFlow<String> = app.terminalSession.workingDirectory
+
+    // MCP bridge
+    val mcpState: StateFlow<McpServerState> = app.mcpServer.state
+
+    private val _mcpToken = MutableStateFlow(app.mcpToken())
+    val mcpToken: StateFlow<String> = _mcpToken.asStateFlow()
+
+    private val _mcpAllowLan = MutableStateFlow(false)
+    val mcpAllowLan: StateFlow<Boolean> = _mcpAllowLan.asStateFlow()
+
+    val isPythonAvailable: Boolean = app.isPythonAvailable
+    val pythonVersion: String = if (app.isPythonAvailable) PythonEngine.pythonVersion() else "unavailable"
+
     // Messages & Alerts
     private val _userMessage = MutableStateFlow<String?>(null)
     val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
@@ -92,6 +112,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadProjects()
         refreshCapabilities()
     }
+
+    // ---------------------------------------------------------------- terminal
+
+    fun startTerminal() {
+        val project = _selectedProject.value
+        val dir = project?.let { File(it.projectRoot) } ?: app.filesDir
+        val env = project?.environment?.associate { it.key to app.secretStore.resolveValue(it.value) } ?: emptyMap()
+        app.terminalSession.start(dir, env)
+    }
+
+    fun sendTerminalCommand(command: String) = app.terminalSession.send(command)
+
+    fun stopTerminal() = app.terminalSession.stop()
+
+    fun clearTerminal() = app.terminalSession.clear()
+
+    // ---------------------------------------------------------------- MCP bridge
+
+    fun setMcpAllowLan(allow: Boolean) {
+        _mcpAllowLan.value = allow
+        if (app.mcpServer.state.value.isRunning) {
+            // Rebind so the change actually takes effect instead of silently waiting for a restart.
+            app.mcpServer.stop()
+            app.mcpServer.start(MCP_PORT, _mcpToken.value, allow)
+            app.serviceSupervisor.setExternalHold(app.mcpServer.state.value.isRunning)
+        }
+    }
+
+    fun toggleMcpServer() {
+        if (app.mcpServer.state.value.isRunning) {
+            app.mcpServer.stop()
+            _userMessage.value = "MCP bridge stopped"
+        } else {
+            app.mcpServer.start(MCP_PORT, _mcpToken.value, _mcpAllowLan.value)
+            val state = app.mcpServer.state.value
+            _userMessage.value = state.lastError?.let { "MCP bridge failed: $it" }
+                ?: "MCP bridge listening on ${state.boundAddress}:${state.port}"
+        }
+        // Hold the process in the foreground while the bridge is up, otherwise Android
+        // reclaims it as soon as the user leaves the app and the client loses its server.
+        app.serviceSupervisor.setExternalHold(app.mcpServer.state.value.isRunning)
+    }
+
+    fun regenerateMcpToken() {
+        _mcpToken.value = app.regenerateMcpToken()
+        if (app.mcpServer.state.value.isRunning) {
+            app.mcpServer.stop()
+            app.mcpServer.start(MCP_PORT, _mcpToken.value, _mcpAllowLan.value)
+        }
+        _userMessage.value = "New MCP token generated. Existing clients must be updated."
+    }
+
+    fun mcpLanAddress(): String = app.portManager.getLanIp()
 
     fun loadProjects() {
         viewModelScope.launch {
@@ -189,17 +262,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveCurrentFile() {
+        viewModelScope.launch { persistCurrentFile(announce = true) }
+    }
+
+    /**
+     * Writes the editor buffer to disk and only returns once it is there, so callers that are
+     * about to execute the file cannot race ahead of the save.
+     */
+    private suspend fun persistCurrentFile(announce: Boolean) {
         val project = _selectedProject.value ?: return
         val tab = _activeTab.value ?: return
-        viewModelScope.launch {
-            try {
-                app.projectStorage.writeFileAtomically(project.id, tab, _editorContent.value)
-                _isDirty.value = false
-                _userMessage.value = "Saved ${File(tab).name}"
-                refreshProjectFiles(project.id)
-            } catch (e: Exception) {
-                _userMessage.value = "Save error: ${e.message}"
-            }
+        try {
+            app.projectStorage.writeFileAtomically(project.id, tab, _editorContent.value)
+            _isDirty.value = false
+            if (announce) _userMessage.value = "Saved ${File(tab).name}"
+            refreshProjectFiles(project.id)
+        } catch (e: Exception) {
+            _userMessage.value = "Save error: ${e.message}"
         }
     }
 
@@ -255,7 +334,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun runProject(project: Project) {
         viewModelScope.launch {
             if (_isDirty.value) {
-                saveCurrentFile()
+                persistCurrentFile(announce = false)
             }
             val started = app.serviceSupervisor.startProject(project)
             if (!started) {
@@ -371,5 +450,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             app.logManager.clear()
         }
+    }
+
+    private companion object {
+        const val MCP_PORT = 8765
     }
 }

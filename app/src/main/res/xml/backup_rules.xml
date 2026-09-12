@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Exclude-only ruleset: everything not listed here is still backed up.
+    The vault SharedPreferences holds Keystore-encrypted secrets whose key never leaves the
+    device, so a backed-up copy would be useless at best and a leak at worst.
+-->
 <full-backup-content>
-    <include domain="sharedpref" path="." />
+    <exclude domain="sharedpref" path="runcode_vault.xml" />
     <exclude domain="database" path="." />
     <exclude domain="file" path="projects/" />
-    <exclude domain="file" path="secrets/" />
-    <exclude domain="root" path="." />
 </full-backup-content>

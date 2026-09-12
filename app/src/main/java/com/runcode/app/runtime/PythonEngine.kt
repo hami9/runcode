@@ -1,23 +1,27 @@
 package com.runcode.app.runtime
 
 import android.content.Context
+import com.chaquo.python.PyObject
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 import com.runcode.app.domain.models.LogLevel
 import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.security.SecretStore
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
+/**
+ * Runs project scripts on the CPython interpreter that Chaquopy embeds in the APK.
+ *
+ * Each service gets its own JVM thread; Chaquopy attaches it to the interpreter, so several
+ * scripts can be in flight at once under the GIL. Output is streamed line by line from the
+ * Python side through [OutputSink] instead of being collected at the end, so a long-running
+ * bot shows up in the console while it runs.
+ */
 class PythonEngine(
     private val context: Context,
     private val secretStore: SecretStore
@@ -26,7 +30,7 @@ class PythonEngine(
     override val descriptor = RuntimeDescriptor(
         id = "embedded_python",
         displayName = "Embedded Python Runtime",
-        version = "3.11-android",
+        version = "CPython 3.12 (Chaquopy)",
         supportedProfiles = listOf(
             ProjectProfile.PYTHON_SCRIPT,
             ProjectProfile.TELEGRAM_BOT,
@@ -37,15 +41,34 @@ class PythonEngine(
         supportsLongRunning = true
     )
 
+    /** Called from runcode_runner.py to push a line of output into the app's log stream. */
+    class OutputSink(private val sink: RuntimeEventSink) {
+        @Suppress("unused") // invoked from Python
+        fun onOutput(level: String, line: String) {
+            sink.onEvent(if (level == "stderr") LogLevel.STDERR else LogLevel.STDOUT, line)
+        }
+    }
+
     override suspend fun checkCompatibility(context: Context): CompatibilityReport {
-        return CompatibilityReport(
-            isCompatible = true,
-            status = "Available",
-            details = "Android-optimized Python runtime with stdlib and sqlite3 bindings"
-        )
+        return if (Python.isStarted()) {
+            CompatibilityReport(
+                isCompatible = true,
+                status = "Available",
+                details = "CPython ${pythonVersion()} (Chaquopy) with the standard library and sqlite3"
+            )
+        } else {
+            CompatibilityReport(
+                isCompatible = false,
+                status = "Unavailable",
+                details = "The embedded interpreter failed to start on this device/ABI"
+            )
+        }
     }
 
     override suspend fun prepare(project: Project): PrepareResult = withContext(Dispatchers.IO) {
+        if (!Python.isStarted()) {
+            return@withContext PrepareResult.Failure("Embedded Python interpreter is not available on this device")
+        }
         val entry = File(project.projectRoot, "source/${project.entryPoint}")
         if (!entry.exists()) {
             return@withContext PrepareResult.Failure("Entrypoint script '${project.entryPoint}' does not exist")
@@ -55,172 +78,88 @@ class PythonEngine(
 
     override suspend fun start(project: Project, sink: RuntimeEventSink): RuntimeHandle = withContext(Dispatchers.IO) {
         val scriptFile = File(project.projectRoot, "source/${project.entryPoint}")
-        val scriptContent = scriptFile.readText()
+        val workingDir = project.workingDirectory.ifBlank { project.projectRoot }
+        val handleServiceId = "svc_py_${project.id}"
 
-        sink.onEvent(LogLevel.SYSTEM, "Initializing Python environment for '${project.name}'...")
+        sink.onEvent(LogLevel.SYSTEM, "Initializing Python ${pythonVersion()} for '${project.name}'...")
 
-        // Build resolved environment variables
-        val envMap = mutableMapOf<String, String>()
-        project.environment.forEach { env ->
-            val resolvedVal = secretStore.resolveValue(env.value)
-            envMap[env.key] = resolvedVal
+        val envPairs = project.environment.map { "${it.key}=${secretStore.resolveValue(it.value)}" }
+        if (envPairs.isNotEmpty()) {
+            sink.onEvent(LogLevel.SYSTEM, "Loaded ${envPairs.size} environment variable(s)")
         }
-
         sink.onEvent(LogLevel.SYSTEM, "Entrypoint: ${project.entryPoint} (${scriptFile.length()} bytes)")
-        if (envMap.isNotEmpty()) {
-            sink.onEvent(LogLevel.SYSTEM, "Loaded ${envMap.size} environment variable(s)")
-        }
 
-        val engineScope = CoroutineScope(Dispatchers.IO)
-        var executionJob: Job? = null
-        var isRunning = true
-        var loopStep = 0L
+        val alive = AtomicBoolean(true)
+        val reason = AtomicReference(ExitReason.RUNNING)
 
-        executionJob = engineScope.launch {
-            try {
-                sink.onEvent(LogLevel.SYSTEM, "--- Python Execution Started ---")
-                executeScriptLines(project, scriptContent, envMap, sink)
-
-                // If profile is a persistent service (Telegram Bot or HTTP Server), maintain supervised loop
-                val isPersistentProfile = project.profile == ProjectProfile.TELEGRAM_BOT ||
-                        project.profile == ProjectProfile.PYTHON_HTTP
-
-                if (isPersistentProfile) {
-                    val token = envMap["TELEGRAM_BOT_TOKEN"] ?: ""
-                    val isBot = project.profile == ProjectProfile.TELEGRAM_BOT
-
-                    if (isBot) {
-                        sink.onEvent(LogLevel.INFO, "[Bot Supervisor] Telegram long-polling loop engaged.")
-                        if (token.isNotEmpty() && !token.contains("SEC_")) {
-                            sink.onEvent(LogLevel.INFO, "[Telegram API] Connected to api.telegram.org (Bot token verified)")
-                        } else {
-                            sink.onEvent(LogLevel.WARN, "[Telegram API] No token provided. Running local bot sandbox simulator.")
-                        }
-                    } else {
-                        sink.onEvent(LogLevel.INFO, "[HTTP Supervisor] Python worker listening on port ${project.network.port}")
-                    }
-
-                    while (isActive && isRunning) {
-                        delay(4000)
-                        loopStep++
-                        val timeStr = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-                        if (isBot) {
-                            if (loopStep % 3 == 0L) {
-                                sink.onEvent(LogLevel.STDOUT, "[$timeStr] [Telegram Polling] update_id=${1000 + loopStep}: ok (0 pending)")
-                            }
-                        } else {
-                            if (loopStep % 4 == 0L) {
-                                sink.onEvent(LogLevel.STDOUT, "[$timeStr] [Worker Pool] active threads=2, queue=0, ok")
-                            }
-                        }
-                    }
-                } else {
-                    sink.onEvent(LogLevel.SYSTEM, "--- Python Execution Finished (Exit Code: 0) ---")
-                    isRunning = false
-                }
-            } catch (_: CancellationException) {
-                sink.onEvent(LogLevel.SYSTEM, "Python process interrupted by user.")
-                isRunning = false
-            } catch (e: Exception) {
-                sink.onEvent(LogLevel.STDERR, "Python Traceback (most recent call last):")
-                sink.onEvent(LogLevel.STDERR, "  ${e.javaClass.simpleName}: ${e.message}")
-                isRunning = false
+        val worker = Thread({
+            sink.onEvent(LogLevel.SYSTEM, "--- Python Execution Started ---")
+            val outcome = try {
+                Python.getInstance().getModule(RUNNER_MODULE).callAttr(
+                    "run_script",
+                    handleServiceId,
+                    scriptFile.absolutePath,
+                    workingDir,
+                    envPairs.toTypedArray(),
+                    OutputSink(sink)
+                ).toString()
+            } catch (e: Throwable) {
+                sink.onEvent(LogLevel.STDERR, "${e.javaClass.simpleName}: ${e.message}")
+                "failed:${e.javaClass.simpleName}"
             }
-        }
+
+            when (outcome) {
+                "completed" -> {
+                    sink.onEvent(LogLevel.SYSTEM, "--- Python Execution Finished (Exit Code: 0) ---")
+                    reason.compareAndSet(ExitReason.RUNNING, ExitReason.COMPLETED)
+                }
+                "stopped" -> {
+                    sink.onEvent(LogLevel.SYSTEM, "Python process stopped.")
+                    reason.set(ExitReason.STOPPED)
+                }
+                else -> {
+                    sink.onEvent(LogLevel.ERROR, "--- Python Execution Failed: ${outcome.removePrefix("failed:")} ---")
+                    reason.compareAndSet(ExitReason.RUNNING, ExitReason.CRASHED)
+                }
+            }
+            alive.set(false)
+        }, "runcode-python-${project.id}")
+        worker.isDaemon = true
+        worker.start()
 
         object : RuntimeHandle {
-            override val serviceId = "svc_py_${project.id}"
+            override val serviceId = handleServiceId
             override val projectId = project.id
-            override val isAlive get() = isRunning
+            override val isAlive get() = alive.get()
             override val boundPort = project.network.port
+            override val exitReason get() = reason.get()
 
             override suspend fun stop() = withContext(Dispatchers.IO) {
-                if (!isRunning) return@withContext
-                sink.onEvent(LogLevel.SYSTEM, "Sending SIGTERM to Python process...")
-                isRunning = false
-                executionJob.cancel()
-                sink.onEvent(LogLevel.SYSTEM, "Python process stopped.")
+                if (!alive.get()) return@withContext
+                sink.onEvent(LogLevel.SYSTEM, "Requesting interpreter shutdown...")
+                reason.set(ExitReason.STOPPED)
+                try {
+                    Python.getInstance().getModule(RUNNER_MODULE).callAttr("request_stop", handleServiceId)
+                } catch (e: Exception) {
+                    sink.onEvent(LogLevel.WARN, "Could not signal the interpreter: ${e.message}")
+                }
+                // The trace hook raises at the script's next executed line, so give it a
+                // moment before declaring the service gone.
+                worker.join(STOP_GRACE_MS)
+                alive.set(false)
             }
 
             override suspend fun forceKill() = stop()
 
             override suspend fun checkHealth(): RuntimeHealth {
+                val running = alive.get()
                 return RuntimeHealth(
-                    isHealthy = isRunning,
-                    cpuPercent = if (isRunning) 2 else 0,
-                    memoryMb = 8.5,
-                    message = if (isRunning) "Execution loop active" else "Exited"
+                    isHealthy = running,
+                    cpuPercent = if (running) 2 else 0,
+                    memoryMb = usedMemoryMb(),
+                    message = if (running) "Interpreter thread active" else "Exited"
                 )
             }
-        }
-    }
-
-    private suspend fun executeScriptLines(
-        project: Project,
-        content: String,
-        env: Map<String, String>,
-        sink: RuntimeEventSink
-    ) {
-        val lines = content.lines()
-        for (rawLine in lines) {
-            val line = rawLine.trim()
-            if (line.isEmpty() || line.startsWith("#")) continue
-
-            // Parse print statement
-            if (line.startsWith("print(") && line.endsWith(")")) {
-                val inside = line.substring(6, line.length - 1).trim()
-                val evaluated = evaluatePrintExpression(inside, env, project)
-                sink.onEvent(LogLevel.STDOUT, evaluated)
-                delay(120)
-            } else if (line.contains("sqlite3.connect")) {
-                sink.onEvent(LogLevel.INFO, "[sqlite3] Opened SQLite database connection")
-                // Check if project has a data/tasks.sqlite to read
-                queryProjectTasks(project, sink)
-            } else if (line.startsWith("time.sleep(")) {
-                val secStr = line.substringAfter("time.sleep(").substringBefore(")").trim()
-                val sec = secStr.toDoubleOrNull() ?: 0.5
-                delay((sec * 1000).toLong().coerceAtMost(2000))
-            }
-        }
-    }
-
-    private fun evaluatePrintExpression(raw: String, env: Map<String, String>, project: Project): String {
-        var str = raw.removeSurrounding("\"").removeSurrounding("'")
-        if (str.startsWith("f\"") || str.startsWith("f'")) {
-            str = str.substring(2, str.length - 1)
-        }
-        // Substitute variables
-        env.forEach { (k, v) ->
-            str = str.replace("{$k}", v).replace("{token}", v)
-        }
-        str = str.replace("{port}", project.network.port.toString())
-        return str
-    }
-
-    private fun queryProjectTasks(project: Project, sink: RuntimeEventSink) {
-        try {
-            val dbFile = File(project.projectRoot, "data/tasks.sqlite")
-            if (dbFile.exists()) {
-                android.database.sqlite.SQLiteDatabase.openDatabase(
-                    dbFile.absolutePath,
-                    null,
-                    android.database.sqlite.SQLiteDatabase.OPEN_READONLY
-                ).use { db ->
-                    db.rawQuery("SELECT id, title, status, priority FROM tasks LIMIT 5", null).use { cursor ->
-                        val count = cursor.count
-                        sink.onEvent(LogLevel.STDOUT, "Found $count tasks in database:")
-                        while (cursor.moveToNext()) {
-                            val id = cursor.getInt(0)
-                            val title = cursor.getString(1)
-                            val status = cursor.getString(2)
-                            val prio = cursor.getInt(3)
-                            sink.onEvent(LogLevel.STDOUT, "  [$id] $title - status: $status (priority $prio)")
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            sink.onEvent(LogLevel.WARN, "Could not query SQLite file: ${e.message}")
         }
     }
 
@@ -236,5 +175,36 @@ class PythonEngine(
 
     override suspend fun health(handle: RuntimeHandle): RuntimeHealth {
         return handle.checkHealth()
+    }
+
+    private fun usedMemoryMb(): Double {
+        val runtime = Runtime.getRuntime()
+        return (runtime.totalMemory() - runtime.freeMemory()) / (1024.0 * 1024.0)
+    }
+
+    companion object {
+        private const val RUNNER_MODULE = "runcode_runner"
+        private const val STOP_GRACE_MS = 3000L
+
+        /** Starts the interpreter once per process. Safe to call repeatedly. */
+        fun ensureStarted(context: Context): Boolean {
+            return try {
+                if (!Python.isStarted()) {
+                    Python.start(AndroidPlatform(context.applicationContext))
+                }
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        fun pythonVersion(): String {
+            return try {
+                val info: PyObject = Python.getInstance().getModule(RUNNER_MODULE).callAttr("interpreter_info")
+                info.toString().substringBefore(' ')
+            } catch (_: Throwable) {
+                "3.12"
+            }
+        }
     }
 }
