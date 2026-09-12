@@ -93,4 +93,8 @@ app/src/main/python/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+runcode itself is MIT — see [LICENSE](LICENSE).
+
+The APK embeds CPython, OpenSSL, SQLite, Chaquopy and the AndroidX/Compose stack. Their
+licences and the required notices are in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
