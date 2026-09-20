@@ -132,6 +132,10 @@ fun HealthScreen(
                     Text("Memory & Resource Headroom", fontWeight = FontWeight.Bold, color = AccentGreen, fontSize = 14.sp)
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    val stats by viewModel.processStats.collectAsState()
+                    HealthRow(label = "runcode PSS", value = String.format(java.util.Locale.US, "%.1f MB", stats.pssMb))
+                    HealthRow(label = "Java heap", value = String.format(java.util.Locale.US, "%.1f MB / %d MB limit", stats.javaHeapMb, stats.heapLimitMb))
+                    HealthRow(label = "Threads / PID", value = "${stats.threads} / ${stats.pid}")
                     HealthRow(label = "Available RAM", value = "${caps?.availableMemoryMb ?: 0} MB / ${caps?.totalMemoryMb ?: 0} MB")
                     HealthRow(label = "Low Memory Flag", value = if (caps?.isLowMemory == true) "YES (Warning)" else "Normal")
                     HealthRow(label = "Internal Storage Free", value = "${caps?.freeStorageMb ?: 0} MB")

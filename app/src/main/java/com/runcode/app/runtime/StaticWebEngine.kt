@@ -5,6 +5,7 @@ import com.runcode.app.domain.models.LogLevel
 import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.network.PortManager
+import com.runcode.app.system.ProcessMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedOutputStream
@@ -30,7 +31,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * the Android platform, so referencing it compiles and then dies with NoClassDefFoundError on
  * device. Every response closes its connection, which keeps the state machine trivial.
  */
-class StaticWebEngine(private val portManager: PortManager) : RuntimeEngine {
+class StaticWebEngine(
+    private val portManager: PortManager,
+    private val monitor: ProcessMonitor
+) : RuntimeEngine {
 
     override val descriptor = RuntimeDescriptor(
         id = "static_web",
@@ -71,8 +75,12 @@ class StaticWebEngine(private val portManager: PortManager) : RuntimeEngine {
         val sourceDir = File(project.projectRoot, "source").canonicalFile
         val workers = Executors.newFixedThreadPool(4)
         val running = AtomicBoolean(true)
+        val acceptTid = java.util.concurrent.atomic.AtomicReference<Long?>(null)
+        val requestCount = java.util.concurrent.atomic.AtomicLong(0)
+        val lastRequestAt = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
 
         val acceptThread = Thread({
+            acceptTid.set(android.os.Process.myTid().toLong())
             while (running.get()) {
                 val socket = try {
                     serverSocket.accept()
@@ -80,6 +88,8 @@ class StaticWebEngine(private val portManager: PortManager) : RuntimeEngine {
                     break // socket closed during shutdown
                 }
                 try {
+                    requestCount.incrementAndGet()
+                    lastRequestAt.set(System.currentTimeMillis())
                     workers.execute { handleConnection(socket, sourceDir, project.entryPoint, sink) }
                 } catch (_: Exception) {
                     closeQuietly(socket)
@@ -104,6 +114,7 @@ class StaticWebEngine(private val portManager: PortManager) : RuntimeEngine {
             override val isAlive get() = running.get()
             override val boundPort = port
             override val exitReason get() = reason
+            override val threadId get() = acceptTid.get()
 
             override suspend fun stop() = withContext(Dispatchers.IO) {
                 if (!running.compareAndSet(true, false)) return@withContext
@@ -123,11 +134,17 @@ class StaticWebEngine(private val portManager: PortManager) : RuntimeEngine {
 
             override suspend fun checkHealth(): RuntimeHealth {
                 val alive = running.get()
+                val cpu = if (alive) acceptTid.get()?.let { monitor.cpuPercentFor(it) } ?: 0 else 0
+                val idleSeconds = (System.currentTimeMillis() - lastRequestAt.get()) / 1000
                 return RuntimeHealth(
                     isHealthy = alive,
-                    cpuPercent = if (alive) 1 else 0,
-                    memoryMb = 4.2,
-                    message = if (alive) "Listening on port $port" else "Stopped"
+                    cpuPercent = cpu,
+                    memoryMb = monitor.javaHeapMb(),
+                    message = if (alive) {
+                        "Listening on port $port - ${requestCount.get()} requests, idle ${idleSeconds}s"
+                    } else {
+                        "Stopped"
+                    }
                 )
             }
         }

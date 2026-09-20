@@ -101,6 +101,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _mcpAllowLan = MutableStateFlow(false)
     val mcpAllowLan: StateFlow<Boolean> = _mcpAllowLan.asStateFlow()
 
+    /** Process-wide resource snapshot, refreshed alongside device capabilities. */
+    private val _processStats = MutableStateFlow(ProcessStats())
+    val processStats: StateFlow<ProcessStats> = _processStats.asStateFlow()
+
+    data class ProcessStats(
+        val pid: Int = 0,
+        val pssMb: Double = 0.0,
+        val javaHeapMb: Double = 0.0,
+        val heapLimitMb: Int = 0,
+        val threads: Int = 0
+    )
+
     private val _lastCrash = MutableStateFlow(app.lastCrashReport())
     val lastCrash: StateFlow<String?> = _lastCrash.asStateFlow()
 
@@ -168,6 +180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun mcpLanAddress(): String = app.portManager.getLanIp()
+
 
     fun dismissCrashReport() {
         app.clearCrashReport()
@@ -318,9 +331,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createProject(name: String, profile: ProjectProfile, port: Int = 8080) {
+    fun createProject(
+        name: String,
+        profile: ProjectProfile,
+        port: Int = 8080,
+        maxCpuPercent: Int = 0,
+        maxHeapMb: Int = 0,
+        idleTimeoutMinutes: Int = 0
+    ) {
         viewModelScope.launch {
-            val project = app.projectStorage.createProjectFromTemplate(name, profile, port)
+            val project = app.projectStorage.createProjectFromTemplate(name, profile, port).copy(
+                maxCpuPercent = maxCpuPercent,
+                maxHeapMb = maxHeapMb,
+                idleTimeoutMinutes = idleTimeoutMinutes
+            )
             app.appMetaDatabase.insertOrUpdateProject(project)
             loadProjects()
             selectProject(project)
@@ -445,6 +469,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val runningCount = app.serviceSupervisor.instances.value.values.count { it.isRunning }
             val caps = app.compatibilityManager.getCapabilities(runningCount, app.serviceSupervisor.isAnyRunning())
             _capabilities.value = caps
+            _processStats.value = withContext(Dispatchers.IO) {
+                val monitor = app.processMonitor
+                ProcessStats(
+                    pid = monitor.pid(),
+                    pssMb = monitor.processMemoryMb(),
+                    javaHeapMb = monitor.javaHeapMb(),
+                    heapLimitMb = monitor.heapLimitMb(app),
+                    threads = monitor.threadCount()
+                )
+            }
         }
     }
 

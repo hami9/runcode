@@ -32,6 +32,9 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
                 allow_lan INTEGER DEFAULT 0,
                 restart_policy TEXT DEFAULT 'ON_FAILURE',
                 start_on_boot INTEGER DEFAULT 0,
+                max_cpu_percent INTEGER DEFAULT 0,
+                max_heap_mb INTEGER DEFAULT 0,
+                idle_timeout_minutes INTEGER DEFAULT 0,
                 environment TEXT DEFAULT '[]',
                 arguments TEXT DEFAULT '[]',
                 working_directory TEXT DEFAULT '',
@@ -61,6 +64,12 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
             db.execSQL("ALTER TABLE projects ADD COLUMN arguments TEXT DEFAULT '[]'")
             db.execSQL("ALTER TABLE projects ADD COLUMN working_directory TEXT DEFAULT ''")
         }
+        if (oldVersion < 3) {
+            // Per-service governance limits; 0 keeps the previous unlimited behaviour.
+            db.execSQL("ALTER TABLE projects ADD COLUMN max_cpu_percent INTEGER DEFAULT 0")
+            db.execSQL("ALTER TABLE projects ADD COLUMN max_heap_mb INTEGER DEFAULT 0")
+            db.execSQL("ALTER TABLE projects ADD COLUMN idle_timeout_minutes INTEGER DEFAULT 0")
+        }
     }
 
     suspend fun insertOrUpdateProject(project: Project) = withContext(Dispatchers.IO) {
@@ -76,6 +85,9 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
             put("allow_lan", if (project.network.allowLan) 1 else 0)
             put("restart_policy", project.restartPolicy.name)
             put("start_on_boot", if (project.startOnBoot) 1 else 0)
+            put("max_cpu_percent", project.maxCpuPercent)
+            put("max_heap_mb", project.maxHeapMb)
+            put("idle_timeout_minutes", project.idleTimeoutMinutes)
             put("environment", encodeEnvironment(project.environment))
             put("arguments", encodeArguments(project.arguments))
             put("working_directory", project.workingDirectory)
@@ -133,9 +145,17 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
             ),
             restartPolicy = policy,
             startOnBoot = cursor.getInt(cursor.getColumnIndexOrThrow("start_on_boot")) == 1,
+            maxCpuPercent = cursor.getIntOrZero("max_cpu_percent"),
+            maxHeapMb = cursor.getIntOrZero("max_heap_mb"),
+            idleTimeoutMinutes = cursor.getIntOrZero("idle_timeout_minutes"),
             createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
             updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at"))
         )
+    }
+
+    private fun Cursor.getIntOrZero(column: String): Int {
+        val index = getColumnIndex(column)
+        return if (index >= 0 && !isNull(index)) getInt(index) else 0
     }
 
     private fun Cursor.getStringOrNull(column: String): String? {
@@ -190,6 +210,6 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
     }
 
     private companion object {
-        const val DB_VERSION = 2
+        const val DB_VERSION = 3
     }
 }

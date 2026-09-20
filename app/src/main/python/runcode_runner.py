@@ -3,7 +3,16 @@ Bridge between the Kotlin runtime engine and the embedded CPython interpreter.
 
 Every script runs through `run_script`, which installs a stdout/stderr tee that pushes
 lines straight back into the app's log stream, points the interpreter at the project
-directory, and exposes a cooperative stop flag so the supervisor can interrupt a loop.
+directory, and gives the supervisor a way to interrupt a running script.
+
+Stopping uses PyThreadState_SetAsyncExc, which raises an exception in the target thread at
+its next bytecode boundary and costs nothing while the script runs normally. The obvious
+alternative, a sys.settrace hook, was measured on device at 25x slower:
+
+    WITH tracer      0.945s  ->   317,478 iter/s
+    WITHOUT tracer   0.037s  -> 8,134,909 iter/s
+
+A trace hook is still used, but only as a fallback where ctypes is unavailable.
 """
 
 import io
@@ -13,18 +22,52 @@ import sys
 import threading
 import traceback
 
-# Stop flags keyed by the service id the Kotlin side generated.
-_stop_flags = {}
-_stop_lock = threading.Lock()
+try:
+    import ctypes
+
+    _set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    _set_async_exc.argtypes = [ctypes.c_ulong, ctypes.py_object]
+    _set_async_exc.restype = ctypes.c_int
+except Exception:  # pragma: no cover - only on a build without ctypes
+    ctypes = None
+    _set_async_exc = None
+
+_lock = threading.Lock()
+_threads = {}       # service_id -> thread ident
+_stop_flags = {}    # service_id -> True, only consulted by the fallback tracer
 
 
-class _Tee(io.TextIOBase):
-    """File-like object that forwards whole lines to the Kotlin sink."""
+class ScriptInterrupt(BaseException):
+    """Raised inside the script when the supervisor asks it to stop."""
 
-    def __init__(self, sink, level):
-        self._sink = sink
+
+class _StreamDispatcher(io.TextIOBase):
+    """
+    Routes writes to whichever service owns the calling thread.
+
+    sys.stdout is process-global, so two concurrent scripts each replacing it meant the
+    last one to start captured both — service A's prints landed in service B's log. One
+    dispatcher is installed instead, and it looks the sink up per thread.
+    """
+
+    def __init__(self, level, original):
         self._level = level
-        self._buffer = ""
+        self._original = original
+        self._sinks = {}     # thread ident -> sink
+        self._buffers = {}   # thread ident -> partial line
+        self._guard = threading.Lock()
+
+    def register(self, ident, sink):
+        with self._guard:
+            self._sinks[ident] = sink
+            self._buffers[ident] = ""
+
+    def unregister(self, ident):
+        with self._guard:
+            leftover = self._buffers.pop(ident, "")
+            sink = self._sinks.pop(ident, None)
+        if leftover and sink is not None:
+            sink.onOutput(self._level, leftover)
 
     def writable(self):
         return True
@@ -32,43 +75,79 @@ class _Tee(io.TextIOBase):
     def write(self, text):
         if not text:
             return 0
-        self._buffer += text
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            self._sink.onOutput(self._level, line)
+        ident = threading.get_ident()
+        with self._guard:
+            sink = self._sinks.get(ident)
+            if sink is None:
+                # Not a script thread: let it through to the platform log.
+                target = self._original
+            else:
+                buffered = self._buffers.get(ident, "") + text
+                lines = buffered.split("\n")
+                self._buffers[ident] = lines.pop()
+                target = None
+
+        if target is not None:
+            try:
+                return target.write(text)
+            except Exception:
+                return len(text)
+
+        for line in lines:
+            sink.onOutput(self._level, line)
         return len(text)
 
     def flush(self):
-        if self._buffer:
-            self._sink.onOutput(self._level, self._buffer)
-            self._buffer = ""
+        ident = threading.get_ident()
+        with self._guard:
+            sink = self._sinks.get(ident)
+            leftover = self._buffers.get(ident, "")
+            if sink is not None:
+                self._buffers[ident] = ""
+        if sink is not None and leftover:
+            sink.onOutput(self._level, leftover)
 
 
-class ScriptInterrupt(BaseException):
-    """Raised inside the script when the supervisor asks it to stop."""
+_stdout_dispatcher = _StreamDispatcher("stdout", sys.stdout)
+_stderr_dispatcher = _StreamDispatcher("stderr", sys.stderr)
+sys.stdout = _stdout_dispatcher
+sys.stderr = _stderr_dispatcher
 
 
 def request_stop(service_id):
-    with _stop_lock:
+    """
+    Ask a running script to stop.
+
+    Returns "async", "flag" or "unknown" so the caller can tell how the request was
+    delivered. A thread blocked inside a C call (a socket read, time.sleep) receives the
+    exception when that call returns, not instantly.
+    """
+    with _lock:
+        ident = _threads.get(service_id)
         _stop_flags[service_id] = True
 
+    if ident is None:
+        return "unknown"
 
-def _clear_stop(service_id):
-    with _stop_lock:
-        _stop_flags.pop(service_id, None)
+    if _set_async_exc is not None:
+        affected = _set_async_exc(ctypes.c_ulong(ident), ctypes.py_object(ScriptInterrupt))
+        if affected > 1:
+            # Raised in more than one thread, which must never happen; undo it.
+            _set_async_exc(ctypes.c_ulong(ident), None)
+            return "unknown"
+        if affected == 1:
+            return "async"
+
+    return "flag"
 
 
-def _should_stop(service_id):
-    with _stop_lock:
-        return _stop_flags.get(service_id, False)
-
-
-def _make_tracer(service_id):
-    """Trace hook that turns the stop flag into an exception at the next executed line."""
+def _fallback_tracer(service_id):
+    """Only used where ctypes is missing: slow, but better than an unstoppable script."""
 
     def tracer(frame, event, arg):
-        if _should_stop(service_id):
-            raise ScriptInterrupt()
+        with _lock:
+            if _stop_flags.get(service_id, False):
+                raise ScriptInterrupt()
         return tracer
 
     return tracer
@@ -78,17 +157,22 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
     """
     Execute `script_path` as __main__.
 
-    Returns "completed", "stopped" or "failed:<message>" so the caller does not have to
-    interpret Python exceptions itself.
+    Returns "completed", "stopped", "fatal:<message>" or "failed:<message>" so the caller
+    does not have to interpret Python exceptions itself.
     """
-    _clear_stop(service_id)
+    ident = threading.get_ident()
+    with _lock:
+        _threads[service_id] = ident
+        _stop_flags.pop(service_id, None)
 
-    previous_stdout, previous_stderr = sys.stdout, sys.stderr
     previous_cwd = os.getcwd()
     previous_argv = list(sys.argv)
 
-    sys.stdout = _Tee(sink, "stdout")
-    sys.stderr = _Tee(sink, "stderr")
+    # Per-thread routing, so concurrent services never steal each other's output.
+    _stdout_dispatcher.register(ident, sink)
+    _stderr_dispatcher.register(ident, sink)
+
+    using_fallback = _set_async_exc is None
 
     try:
         for pair in env_pairs:
@@ -107,17 +191,19 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
 
         sys.argv = [script_path]
 
-        threading.settrace(_make_tracer(service_id))
-        sys.settrace(_make_tracer(service_id))
+        if using_fallback:
+            sys.settrace(_fallback_tracer(service_id))
         try:
             runpy.run_path(script_path, run_name="__main__")
         finally:
-            sys.settrace(None)
-            threading.settrace(None)
+            if using_fallback:
+                sys.settrace(None)
 
         return "completed"
 
     except ScriptInterrupt:
+        return "stopped"
+    except KeyboardInterrupt:
         return "stopped"
     except SystemExit as exit_error:
         code = exit_error.code
@@ -137,18 +223,16 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
         summary = traceback.format_exception_only(*sys.exc_info()[:2])[-1].strip()
         return "failed:{}".format(summary)
     finally:
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:
-            pass
-        sys.stdout, sys.stderr = previous_stdout, previous_stderr
+        _stdout_dispatcher.unregister(ident)
+        _stderr_dispatcher.unregister(ident)
         sys.argv = previous_argv
         try:
             os.chdir(previous_cwd)
         except Exception:
             pass
-        _clear_stop(service_id)
+        with _lock:
+            _threads.pop(service_id, None)
+            _stop_flags.pop(service_id, None)
 
 
 def run_snippet(code, working_dir):
@@ -159,10 +243,16 @@ def run_snippet(code, working_dir):
     than a live stream.
     """
     buffer = io.StringIO()
-    previous_stdout, previous_stderr = sys.stdout, sys.stderr
+
+    class _Collector:
+        def onOutput(self, level, line):
+            buffer.write(line)
+            buffer.write("\n")
+
+    ident = threading.get_ident()
     previous_cwd = os.getcwd()
-    sys.stdout = buffer
-    sys.stderr = buffer
+    _stdout_dispatcher.register(ident, _Collector())
+    _stderr_dispatcher.register(ident, _Collector())
     try:
         if working_dir and os.path.isdir(working_dir):
             os.chdir(working_dir)
@@ -170,7 +260,8 @@ def run_snippet(code, working_dir):
     except BaseException:
         buffer.write(traceback.format_exc())
     finally:
-        sys.stdout, sys.stderr = previous_stdout, previous_stderr
+        _stdout_dispatcher.unregister(ident)
+        _stderr_dispatcher.unregister(ident)
         try:
             os.chdir(previous_cwd)
         except Exception:
@@ -179,5 +270,5 @@ def run_snippet(code, working_dir):
 
 
 def interpreter_info():
-    """Human-readable runtime banner used by the Health screen."""
+    """Human-readable runtime banner used by the System screen."""
     return "{} on {}".format(sys.version.split()[0], sys.platform)

@@ -19,6 +19,7 @@ import com.runcode.app.storage.ProjectStorage
 import com.runcode.app.supervisor.ServiceSupervisor
 import com.runcode.app.system.CompatibilityManager
 import com.runcode.app.system.CrashReporter
+import com.runcode.app.system.ProcessMonitor
 import com.runcode.app.terminal.TerminalSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,8 @@ class RuncodeApp : Application() {
         private set
     lateinit var mcpServer: McpServer
         private set
+    lateinit var processMonitor: ProcessMonitor
+        private set
 
     var isPythonAvailable: Boolean = false
         private set
@@ -71,12 +74,13 @@ class RuncodeApp : Application() {
         backupManager = BackupManager(this, projectStorage)
         compatibilityManager = CompatibilityManager(this)
         terminalSession = TerminalSession(this)
+        processMonitor = ProcessMonitor()
 
         // The embedded CPython has to be started once per process, before any engine uses it.
         isPythonAvailable = PythonEngine.ensureStarted(this)
 
-        val pythonEngine = PythonEngine(this, secretStore)
-        val staticWebEngine = StaticWebEngine(portManager)
+        val pythonEngine = PythonEngine(this, secretStore, processMonitor)
+        val staticWebEngine = StaticWebEngine(portManager, processMonitor)
         runtimeRegistry = RuntimeRegistry(pythonEngine, staticWebEngine)
 
         serviceSupervisor = ServiceSupervisor(

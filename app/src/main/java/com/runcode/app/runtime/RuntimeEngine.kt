@@ -67,6 +67,12 @@ interface RuntimeHandle {
     val isAlive: Boolean
     val boundPort: Int
     val exitReason: ExitReason
+
+    /**
+     * Linux tid of the thread doing this service's work, so CPU can be attributed to it.
+     * Null when the runtime has no single thread to point at.
+     */
+    val threadId: Long?
     suspend fun stop()
     suspend fun forceKill()
     suspend fun checkHealth(): RuntimeHealth

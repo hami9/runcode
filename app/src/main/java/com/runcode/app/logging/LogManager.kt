@@ -5,6 +5,7 @@ import com.runcode.app.domain.models.LogLevel
 import com.runcode.app.domain.models.RuntimeEvent
 import com.runcode.app.security.SecretRedactor
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +28,17 @@ class LogManager(private val context: Context) {
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
+    /** One consumer, so lines reach the file in the order they were emitted. */
+    private val writeQueue = Channel<RuntimeEvent>(Channel.UNLIMITED)
+
+    init {
+        scope.launch {
+            for (event in writeQueue) {
+                appendToDisk(event)
+            }
+        }
+    }
+
     fun log(projectId: String, serviceName: String, level: LogLevel, rawMessage: String) {
         val sanitized = SecretRedactor.redact(rawMessage)
         val event = RuntimeEvent(
@@ -44,29 +56,36 @@ class LogManager(private val context: Context) {
         }
         _eventsFlow.value = buffer.toList()
 
-        // Append to project log file asynchronously
-        scope.launch {
-            try {
-                val logDir = File(context.filesDir, "projects/$projectId/logs")
-                if (!logDir.exists()) logDir.mkdirs()
-                val logFile = File(logDir, "runtime.log")
+        // Hand off to the single writer. Launching a coroutine per line interleaved them,
+        // so the file came out in a different order than the lines were emitted in while
+        // the in-memory view stayed correct.
+        writeQueue.trySend(event)
+    }
 
-                // Rotate if > 2MB
-                if (logFile.exists() && logFile.length() > 2 * 1024 * 1024) {
-                    val backupFile = File(logDir, "runtime.log.1")
-                    if (backupFile.exists()) backupFile.delete()
-                    logFile.renameTo(backupFile)
-                }
+    private fun appendToDisk(event: RuntimeEvent) {
+        try {
+            val logDir = File(context.filesDir, "projects/${event.projectId}/logs")
+            if (!logDir.exists()) logDir.mkdirs()
+            val logFile = File(logDir, "runtime.log")
 
-                FileWriter(logFile, true).use { writer ->
-                    val timeStr = timeFormat.format(Date(event.timestamp))
-                    writer.write("[$timeStr] [${event.level.name}] [${event.serviceName}] ${event.message}\n")
-                }
-            } catch (_: Exception) {
-                // Ignore disk log failure to protect runtime execution
+            // Rotate if > 2MB
+            if (logFile.exists() && logFile.length() > 2 * 1024 * 1024) {
+                val backupFile = File(logDir, "runtime.log.1")
+                if (backupFile.exists()) backupFile.delete()
+                logFile.renameTo(backupFile)
             }
+
+            FileWriter(logFile, true).use { writer ->
+                writer.write("[${formatTime(event.timestamp)}] [${event.level.name}] [${event.serviceName}] ${event.message}\n")
+            }
+        } catch (_: Exception) {
+            // Ignore disk log failure to protect runtime execution
         }
     }
+
+    /** SimpleDateFormat is not thread safe and this is reached from several threads. */
+    private fun formatTime(timestamp: Long): String =
+        synchronized(timeFormat) { timeFormat.format(Date(timestamp)) }
 
     fun getLogsForProject(projectId: String): List<RuntimeEvent> {
         return buffer.filter { it.projectId == projectId }

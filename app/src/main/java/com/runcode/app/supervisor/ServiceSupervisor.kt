@@ -189,19 +189,47 @@ class ServiceSupervisor(
 
     private suspend fun superviseLifecycle(project: Project, handle: RuntimeHandle) {
         var consecutiveCrashes = 0
+        var consecutiveOverLimit = 0
 
         while (true) {
-            delay(3000)
+            delay(HEARTBEAT_MS)
 
             if (handle.isAlive) {
                 try {
                     val health = handle.checkHealth()
+                    val breach = limitBreach(project, health)
+
                     updateInstance(project.id) {
                         it.copy(
                             lastHealthCheck = System.currentTimeMillis(),
                             cpuEstimatePercent = health.cpuPercent,
-                            memoryEstimateMb = health.memoryMb
+                            memoryEstimateMb = health.memoryMb,
+                            state = if (breach != null) ServiceState.DEGRADED else ServiceState.RUNNING,
+                            lastError = breach
                         )
+                    }
+
+                    if (breach != null) {
+                        consecutiveOverLimit++
+                        if (consecutiveOverLimit == 1) {
+                            logManager.log(project.id, project.name, LogLevel.WARN, "Over limit: $breach")
+                        }
+                        // One spike is not a runaway; a sustained breach is.
+                        if (consecutiveOverLimit >= BREACHES_BEFORE_STOP) {
+                            logManager.log(
+                                project.id,
+                                project.name,
+                                LogLevel.ERROR,
+                                "Stopping '${project.name}': $breach for ${consecutiveOverLimit * HEARTBEAT_MS / 1000}s."
+                            )
+                            // Deregister first: stopProject cancels the job registered for
+                            // this project, and that job is the one running right now.
+                            supervisorJobs.remove(project.id)
+                            stopProject(project.id)
+                            break
+                        }
+                    } else {
+                        consecutiveOverLimit = 0
                     }
                 } catch (_: Exception) {
                 }
@@ -286,6 +314,29 @@ class ServiceSupervisor(
         }
     }
 
+    /**
+     * Describes which governance limit a sample crossed, or null when it is within budget.
+     * Limits are the app policing its own services; nothing here touches the rest of the
+     * device, which an Android app has no way to influence anyway.
+     */
+    private fun limitBreach(project: Project, health: com.runcode.app.runtime.RuntimeHealth): String? {
+        if (project.maxCpuPercent > 0 && health.cpuPercent > project.maxCpuPercent) {
+            return "CPU ${health.cpuPercent}% over the ${project.maxCpuPercent}% limit"
+        }
+        if (project.maxHeapMb > 0 && health.memoryMb > project.maxHeapMb) {
+            return "heap ${"%.1f".format(health.memoryMb)}MB over the ${project.maxHeapMb}MB limit"
+        }
+        if (project.idleTimeoutMinutes > 0) {
+            // The web engine reports "... idle <n>s" in its health message; anything else has
+            // no idle notion, so the limit simply does not apply.
+            val idleSeconds = health.message.substringAfterLast("idle ", "").removeSuffix("s").toIntOrNull()
+            if (idleSeconds != null && idleSeconds >= project.idleTimeoutMinutes * 60) {
+                return "idle for ${idleSeconds / 60}m, past the ${project.idleTimeoutMinutes}m timeout"
+            }
+        }
+        return null
+    }
+
     private fun releaseService(projectId: String) {
         activeHandles.remove(projectId)
         activeProfiles.remove(projectId)
@@ -368,6 +419,8 @@ class ServiceSupervisor(
     }
 
     private companion object {
+        const val HEARTBEAT_MS = 3000L
+        const val BREACHES_BEFORE_STOP = 3
         const val MAX_RESTARTS = 4
         const val WAKELOCK_TIMEOUT_MS = 60L * 60L * 1000L
     }

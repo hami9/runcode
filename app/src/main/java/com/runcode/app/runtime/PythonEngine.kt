@@ -8,6 +8,7 @@ import com.runcode.app.domain.models.LogLevel
 import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.security.SecretStore
+import com.runcode.app.system.ProcessMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -24,7 +25,8 @@ import java.util.concurrent.atomic.AtomicReference
  */
 class PythonEngine(
     private val context: Context,
-    private val secretStore: SecretStore
+    private val secretStore: SecretStore,
+    private val monitor: ProcessMonitor
 ) : RuntimeEngine {
 
     override val descriptor = RuntimeDescriptor(
@@ -91,21 +93,39 @@ class PythonEngine(
 
         val alive = AtomicBoolean(true)
         val reason = AtomicReference(ExitReason.RUNNING)
+        // The Linux tid is only knowable from inside the thread itself.
+        val workerTid = AtomicReference<Long?>(null)
 
         val worker = Thread({
+            workerTid.set(android.os.Process.myTid().toLong())
             sink.onEvent(LogLevel.SYSTEM, "--- Python Execution Started ---")
-            val outcome = try {
-                Python.getInstance().getModule(RUNNER_MODULE).callAttr(
-                    "run_script",
-                    handleServiceId,
-                    scriptFile.absolutePath,
-                    workingDir,
-                    envPairs.toTypedArray(),
-                    OutputSink(sink)
-                ).toString()
+
+            // Loading the bridge module is separate from running the script: if the bridge
+            // itself is broken no script will ever run, so that is fatal rather than a
+            // crash worth retrying.
+            val runner = try {
+                Python.getInstance().getModule(RUNNER_MODULE)
             } catch (e: Throwable) {
-                sink.onEvent(LogLevel.STDERR, "${e.javaClass.simpleName}: ${e.message}")
-                "failed:${e.javaClass.simpleName}"
+                sink.onEvent(LogLevel.ERROR, "Runtime bridge failed to load: ${e.message}")
+                null
+            }
+
+            val outcome = if (runner == null) {
+                "fatal:the embedded Python bridge could not be loaded"
+            } else {
+                try {
+                    runner.callAttr(
+                        "run_script",
+                        handleServiceId,
+                        scriptFile.absolutePath,
+                        workingDir,
+                        envPairs.toTypedArray(),
+                        OutputSink(sink)
+                    ).toString()
+                } catch (e: Throwable) {
+                    sink.onEvent(LogLevel.STDERR, "${e.javaClass.simpleName}: ${e.message}")
+                    "failed:${e.javaClass.simpleName}"
+                }
             }
 
             when (outcome) {
@@ -126,6 +146,7 @@ class PythonEngine(
                     reason.compareAndSet(ExitReason.RUNNING, ExitReason.CRASHED)
                 }
             }
+            workerTid.get()?.let { monitor.forget(it) }
             alive.set(false)
         }, "runcode-python-${project.id}")
         worker.isDaemon = true
@@ -137,6 +158,7 @@ class PythonEngine(
             override val isAlive get() = alive.get()
             override val boundPort = project.network.port
             override val exitReason get() = reason.get()
+            override val threadId get() = workerTid.get()
 
             override suspend fun stop() = withContext(Dispatchers.IO) {
                 if (!alive.get()) return@withContext
@@ -157,10 +179,11 @@ class PythonEngine(
 
             override suspend fun checkHealth(): RuntimeHealth {
                 val running = alive.get()
+                val cpu = if (running) workerTid.get()?.let { monitor.cpuPercentFor(it) } ?: 0 else 0
                 return RuntimeHealth(
                     isHealthy = running,
-                    cpuPercent = if (running) 2 else 0,
-                    memoryMb = usedMemoryMb(),
+                    cpuPercent = cpu,
+                    memoryMb = monitor.javaHeapMb(),
                     message = if (running) "Interpreter thread active" else "Exited"
                 )
             }
@@ -179,11 +202,6 @@ class PythonEngine(
 
     override suspend fun health(handle: RuntimeHandle): RuntimeHealth {
         return handle.checkHealth()
-    }
-
-    private fun usedMemoryMb(): Double {
-        val runtime = Runtime.getRuntime()
-        return (runtime.totalMemory() - runtime.freeMemory()) / (1024.0 * 1024.0)
     }
 
     companion object {

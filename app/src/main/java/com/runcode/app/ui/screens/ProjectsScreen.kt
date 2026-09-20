@@ -257,6 +257,9 @@ fun ProjectsScreen(
         var selectedProfile by remember { mutableStateOf(ProjectProfile.PYTHON_SCRIPT) }
         var portStr by remember { mutableStateOf("8080") }
         var profileExpanded by remember { mutableStateOf(false) }
+        var cpuLimitStr by remember { mutableStateOf("") }
+        var heapLimitStr by remember { mutableStateOf("") }
+        var idleTimeoutStr by remember { mutableStateOf("") }
 
         AlertDialog(
             onDismissRequest = { showCreateDialog = false },
@@ -309,6 +312,36 @@ fun ProjectsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
+
+                    Text(
+                        "Limits — leave blank for unlimited. The supervisor stops the service " +
+                            "if it stays over for 9 seconds.",
+                        fontSize = 11.sp,
+                        color = TextMuted
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = cpuLimitStr,
+                            onValueChange = { cpuLimitStr = it.filter(Char::isDigit) },
+                            label = { Text("CPU %", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = heapLimitStr,
+                            onValueChange = { heapLimitStr = it.filter(Char::isDigit) },
+                            label = { Text("Heap MB", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = idleTimeoutStr,
+                            onValueChange = { idleTimeoutStr = it.filter(Char::isDigit) },
+                            label = { Text("Idle min", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -316,7 +349,14 @@ fun ProjectsScreen(
                     onClick = {
                         val port = portStr.toIntOrNull() ?: 8080
                         val name = newName.ifBlank { selectedProfile.displayName }
-                        viewModel.createProject(name, selectedProfile, port)
+                        viewModel.createProject(
+                            name = name,
+                            profile = selectedProfile,
+                            port = port,
+                            maxCpuPercent = cpuLimitStr.toIntOrNull() ?: 0,
+                            maxHeapMb = heapLimitStr.toIntOrNull() ?: 0,
+                            idleTimeoutMinutes = idleTimeoutStr.toIntOrNull() ?: 0
+                        )
                         showCreateDialog = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = AccentCyan)

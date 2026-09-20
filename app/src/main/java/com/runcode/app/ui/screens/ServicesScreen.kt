@@ -319,7 +319,8 @@ fun InstanceSupervisorCard(
         ServiceState.RUNNING -> AccentGreen
         ServiceState.PREPARING, ServiceState.STARTING, ServiceState.RESTARTING -> Color(0xFFFFB300)
         ServiceState.FAILED -> AccentRed
-        ServiceState.STOPPED, ServiceState.STOPPING, ServiceState.DEGRADED -> TextMuted
+        ServiceState.DEGRADED -> Color(0xFFFFB300)
+        ServiceState.STOPPED, ServiceState.STOPPING -> TextMuted
     }
 
     Card(
@@ -356,7 +357,7 @@ fun InstanceSupervisorCard(
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Port: ${instance.port} • Uptime: ${instance.uptimeSeconds}s • RAM: ${instance.memoryLabel}MB • Restarts: ${instance.restartCount}",
+                    text = "Port: ${instance.port} • Up: ${instance.uptimeSeconds}s • CPU: ${instance.cpuEstimatePercent}% • Heap: ${instance.memoryLabel}MB • Restarts: ${instance.restartCount}",
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     color = TextSecondary

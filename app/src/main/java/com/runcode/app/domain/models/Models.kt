@@ -58,6 +58,10 @@ data class Project(
     val workingDirectory: String = "",
     val restartPolicy: RestartPolicy = RestartPolicy.ON_FAILURE,
     val startOnBoot: Boolean = false,
+    /** Governance limits; 0 means unlimited. Enforced by the supervisor, not the OS. */
+    val maxCpuPercent: Int = 0,
+    val maxHeapMb: Int = 0,
+    val idleTimeoutMinutes: Int = 0,
     val network: NetworkConfig = NetworkConfig(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
