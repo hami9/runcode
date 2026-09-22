@@ -135,7 +135,13 @@ fun FilePane(
 
     fun startImport(dir: String) {
         pendingImportDir = dir
+        expanded = (expanded + withAncestors(dir)).distinct()
         importFiles.launch(arrayOf("*/*"))
+    }
+
+    /** Opens every folder down to [path], so whatever was just created there is visible. */
+    fun reveal(path: String) {
+        expanded = (expanded + withAncestors(path)).distinct()
     }
 
     val entryPath = "source/${project.entryPoint}"
@@ -346,6 +352,7 @@ fun FilePane(
             onDismiss = { dialog = null },
             onConfirm = { name ->
                 dialog = null
+                reveal((current.parent + "/" + name.trim().trim('/')).substringBeforeLast('/'))
                 viewModel.createNewFile(current.parent, name)
             }
         )
@@ -357,7 +364,7 @@ fun FilePane(
             onDismiss = { dialog = null },
             onConfirm = { name ->
                 dialog = null
-                expanded = expanded + current.parent
+                reveal((current.parent + "/" + name.trim().trim('/')).substringBeforeLast('/'))
                 viewModel.createFolder(current.parent, name)
             }
         )
@@ -378,7 +385,7 @@ fun FilePane(
             onDismiss = { dialog = null },
             onConfirm = { destination ->
                 dialog = null
-                expanded = expanded + destination
+                reveal(destination)
                 viewModel.movePath(current.node.relativePath, destination)
             }
         )
@@ -530,6 +537,12 @@ private fun visibleRows(nodes: List<FileNode>, expanded: Set<String>, depth: Int
         val row = listOf(FileRow(node, depth))
         if (node.isDirectory && node.relativePath in expanded) row + visibleRows(node.children, expanded, depth + 1) else row
     }
+
+/** [path] and every folder above it: `source/a/b` gives source, source/a and source/a/b. */
+private fun withAncestors(path: String): List<String> {
+    val parts = path.trim('/').split('/').filter { it.isNotEmpty() }
+    return parts.indices.map { parts.subList(0, it + 1).joinToString("/") }
+}
 
 private fun allDirectories(nodes: List<FileNode>): List<String> =
     nodes.filter { it.isDirectory }.flatMap { listOf(it.relativePath) + allDirectories(it.children) }
