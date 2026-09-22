@@ -20,8 +20,11 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.Stop
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -67,6 +70,9 @@ import com.runcode.app.ui.theme.TextMuted
 import com.runcode.app.ui.theme.TextPrimary
 import com.runcode.app.ui.theme.TextSecondary
 
+/** Providers disagree on what a zip is; this covers the ones seen in practice. */
+private val ZIP_MIME_TYPES = arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProjectsScreen(
@@ -79,6 +85,11 @@ fun ProjectsScreen(
     var searchQuery by remember { mutableStateOf("") }
     var showCreateDialog by remember { mutableStateOf(false) }
     var projectToDelete by remember { mutableStateOf<Project?>(null) }
+
+    // Any .zip: a runcode export comes back with its settings, anything else becomes a Python project.
+    val importProject = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.importProject(uri) { onNavigate(Screen.EDITOR) }
+    }
 
     val filteredProjects = projects.filter {
         it.name.contains(searchQuery, ignoreCase = true) ||
@@ -96,20 +107,29 @@ fun ProjectsScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Column {
+            // Weighted so the title wraps rather than squeezing the buttons.
+            Column(modifier = Modifier.weight(1f)) {
                 Text("Project Workspace", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
                 Text("Manage local project instances and runtimes", fontSize = 12.sp, color = TextSecondary)
             }
 
-            Button(
-                onClick = { showCreateDialog = true },
-                colors = ButtonDefaults.buttonColors(containerColor = AccentCyan),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.testTag("projects_create_btn")
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, tint = Color.Black, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("New Project", color = Color.Black, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { importProject.launch(ZIP_MIME_TYPES) },
+                    modifier = Modifier.testTag("projects_import_btn")
+                ) {
+                    Icon(Icons.Default.UploadFile, contentDescription = "Import project from a .zip", tint = AccentCyan)
+                }
+                Button(
+                    onClick = { showCreateDialog = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentCyan),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("projects_create_btn")
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, tint = Color.Black, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("New Project", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
             }
         }
 
@@ -214,11 +234,14 @@ fun ProjectsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
+                            // Weighted: unweighted, this line took the whole width and pushed the
+                            // edit/backup/delete buttons off the card on phone-sized screens.
                             Text(
                                 text = "Entry: ${project.entryPoint} • Port: ${project.network.port} • Restart: ${project.restartPolicy.name}",
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
-                                color = TextMuted
+                                color = TextMuted,
+                                modifier = Modifier.weight(1f).padding(end = 8.dp)
                             )
 
                             Row {

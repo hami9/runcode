@@ -15,6 +15,7 @@ import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.runtime.RuntimeRegistry
 import com.runcode.app.runtime.StaticWebEngine
 import com.runcode.app.security.SecretStore
+import com.runcode.app.storage.ProjectArchive
 import com.runcode.app.storage.ProjectStorage
 import com.runcode.app.supervisor.ServiceSupervisor
 import com.runcode.app.system.CompatibilityManager
@@ -23,6 +24,8 @@ import com.runcode.app.system.ProcessMonitor
 import com.runcode.app.terminal.TerminalSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import java.io.File
 import java.security.SecureRandom
@@ -55,6 +58,16 @@ class RuncodeApp : Application() {
         private set
     lateinit var processMonitor: ProcessMonitor
         private set
+    lateinit var projectArchive: ProjectArchive
+        private set
+
+    private val _projectChanges = MutableSharedFlow<String>(extraBufferCapacity = 64)
+
+    /**
+     * Ids of projects changed by something other than the UI, i.e. the MCP bridge, so the
+     * editor and file tree can show an AI client's edits without a manual refresh.
+     */
+    val projectChanges: SharedFlow<String> = _projectChanges
 
     var isPythonAvailable: Boolean = false
         private set
@@ -72,6 +85,7 @@ class RuncodeApp : Application() {
         appMetaDatabase = AppMetaDatabase(this)
         projectDatabaseManager = ProjectDatabaseManager()
         backupManager = BackupManager(this, projectStorage)
+        projectArchive = ProjectArchive(this, projectStorage)
         compatibilityManager = CompatibilityManager(this)
         terminalSession = TerminalSession(this)
         processMonitor = ProcessMonitor()
@@ -98,7 +112,8 @@ class RuncodeApp : Application() {
                 serviceSupervisor = serviceSupervisor,
                 logManager = logManager,
                 terminalSession = terminalSession,
-                runPython = ::runPythonSnippet
+                runPython = ::runPythonSnippet,
+                onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) }
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )

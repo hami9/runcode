@@ -20,7 +20,9 @@ class McpToolHost(
     val serviceSupervisor: ServiceSupervisor,
     val logManager: LogManager,
     val terminalSession: TerminalSession,
-    val runPython: (code: String, workingDir: File) -> String
+    val runPython: (code: String, workingDir: File) -> String,
+    /** Tells the UI a project's files or settings changed underneath it. */
+    val onProjectChanged: (projectId: String) -> Unit
 ) {
     suspend fun projectOrNull(projectId: String): Project? =
         appMetaDatabase.getAllProjects().find { it.id == projectId }

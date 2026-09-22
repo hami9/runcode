@@ -7,16 +7,11 @@ import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.domain.models.RestartPolicy
 import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
-import java.io.OutputStream
 import java.util.UUID
-import java.util.zip.ZipEntry
-import java.util.zip.ZipInputStream
-import java.util.zip.ZipOutputStream
 
 class ProjectStorage(private val context: Context) {
 
@@ -44,9 +39,11 @@ class ProjectStorage(private val context: Context) {
         return File(getProjectDir(projectId), "backups")
     }
 
+    fun newProjectId(): String = UUID.randomUUID().toString().substring(0, 8)
+
     fun initializeProjectDirectories(projectId: String) {
         val root = getProjectDir(projectId)
-        listOf("source", "data", "config", "logs", "cache", "backups").forEach { sub ->
+        STRUCTURAL_DIRS.forEach { sub ->
             val dir = File(root, sub)
             if (!dir.exists()) dir.mkdirs()
         }
@@ -57,7 +54,7 @@ class ProjectStorage(private val context: Context) {
         profile: ProjectProfile,
         customPort: Int = 8080
     ): Project {
-        val id = UUID.randomUUID().toString().substring(0, 8)
+        val id = newProjectId()
         initializeProjectDirectories(id)
         val sourceDir = getSourceDir(id)
         val dataDir = getDataDir(id)
@@ -308,15 +305,50 @@ print("Database operations complete.")
         } catch (_: Exception) {}
     }
 
+    // ---------------------------------------------------------------- file access
+    //
+    // Every path the file manager, the editor and the MCP bridge hand in goes through
+    // resolveInProject, so there is exactly one containment check to get right.
+
     /**
-     * Safely reads text from a file inside project source or data, preventing path traversal.
+     * Resolves [relativePath] against the project root and refuses anything that escapes it.
+     *
+     * The trailing separator matters: a bare prefix test lets `projects/abc` accept
+     * `projects/abcd/...`, which is a different project.
      */
-    fun readFile(projectId: String, relativePath: String): String {
+    fun resolveInProject(projectId: String, relativePath: String): File {
         val root = getProjectDir(projectId).canonicalFile
         val target = File(root, relativePath).canonicalFile
-        if (!target.path.startsWith(root.path)) {
-            throw SecurityException("Access denied: path traversal attempted: $relativePath")
+        if (target != root && !target.path.startsWith(root.path + File.separator)) {
+            throw SecurityException("Access denied: '$relativePath' is outside the project")
         }
+        return target
+    }
+
+    /** Canonical project-relative form of [relativePath], e.g. `./source//a.py` -> `source/a.py`. */
+    fun normalize(projectId: String, relativePath: String): String =
+        relativePathOf(projectId, resolveInProject(projectId, relativePath))
+
+    /** Path of [file] relative to the project root, always with forward slashes. */
+    fun relativePathOf(projectId: String, file: File): String =
+        file.canonicalFile.relativeTo(getProjectDir(projectId).canonicalFile).path
+            .replace(File.separatorChar, '/')
+
+    /** What a path holds, so callers can refuse to load a binary or huge file as text. */
+    fun inspect(projectId: String, relativePath: String, textLimitBytes: Long = MAX_TEXT_BYTES): FileInfo {
+        val target = resolveInProject(projectId, relativePath)
+        return when {
+            !target.exists() -> FileInfo(FileKind.MISSING, 0)
+            target.isDirectory -> FileInfo(FileKind.DIRECTORY, 0)
+            looksBinary(target) -> FileInfo(FileKind.BINARY, target.length())
+            target.length() > textLimitBytes -> FileInfo(FileKind.TOO_LARGE, target.length())
+            else -> FileInfo(FileKind.TEXT, target.length())
+        }
+    }
+
+    /** Reads a text file; a file that does not exist yet reads as empty. */
+    fun readFile(projectId: String, relativePath: String): String {
+        val target = resolveInProject(projectId, relativePath)
         if (!target.exists()) return ""
         return target.readText()
     }
@@ -325,10 +357,9 @@ print("Database operations complete.")
      * Atomic write to file: writes to sibling tmp file, syncs, then renames.
      */
     fun writeFileAtomically(projectId: String, relativePath: String, content: String) {
-        val root = getProjectDir(projectId).canonicalFile
-        val target = File(root, relativePath).canonicalFile
-        if (!target.path.startsWith(root.path)) {
-            throw SecurityException("Access denied: path traversal attempted: $relativePath")
+        val target = resolveInProject(projectId, relativePath)
+        if (target.isDirectory) {
+            throw IllegalArgumentException("'$relativePath' is a folder, not a file")
         }
         target.parentFile?.mkdirs()
 
@@ -345,10 +376,23 @@ print("Database operations complete.")
         }
     }
 
+    /**
+     * The whole project tree, not just `source/`: scripts write their output next to their
+     * data, and a file manager that cannot show that output is not much use.
+     */
     fun listProjectFiles(projectId: String): List<FileNode> {
-        val root = getSourceDir(projectId)
+        val root = getProjectDir(projectId)
         if (!root.exists()) return emptyList()
-        return scanDir(root, "")
+        return scanDir(root, "").sortedWith(compareBy({ topLevelRank(it) }, { it.name.lowercase() }))
+    }
+
+    private fun topLevelRank(node: FileNode): Int {
+        val structural = STRUCTURAL_DIRS.indexOf(node.name)
+        return when {
+            node.isDirectory && structural >= 0 -> structural
+            node.isDirectory -> STRUCTURAL_DIRS.size
+            else -> STRUCTURAL_DIRS.size + 1
+        }
     }
 
     private fun scanDir(dir: File, currentRelPath: String): List<FileNode> {
@@ -359,7 +403,7 @@ print("Database operations complete.")
                 list.add(
                     FileNode(
                         name = child.name,
-                        relativePath = "source/$relPath",
+                        relativePath = relPath,
                         isDirectory = true,
                         size = 0L,
                         children = scanDir(child, relPath)
@@ -369,7 +413,7 @@ print("Database operations complete.")
                 list.add(
                     FileNode(
                         name = child.name,
-                        relativePath = "source/$relPath",
+                        relativePath = relPath,
                         isDirectory = false,
                         size = child.length(),
                         children = emptyList()
@@ -380,75 +424,154 @@ print("Database operations complete.")
         return list
     }
 
-    fun deleteFile(projectId: String, relativePath: String): Boolean {
-        val root = getProjectDir(projectId).canonicalFile
-        val target = File(root, relativePath).canonicalFile
-        if (!target.path.startsWith(root.path)) {
-            throw SecurityException("Access denied: path traversal attempted")
+    /** Creates a folder (and any missing parents). Returns its project-relative path. */
+    fun createDirectory(projectId: String, relativePath: String): String {
+        val target = resolveInProject(projectId, relativePath)
+        if (target.exists() && !target.isDirectory) {
+            throw IllegalArgumentException("A file named '${target.name}' already exists there")
         }
+        if (!target.exists() && !target.mkdirs()) {
+            throw IllegalStateException("Could not create folder '$relativePath'")
+        }
+        return relativePathOf(projectId, target)
+    }
+
+    /**
+     * Renames or moves a file or folder. [toRelativePath] is the full new path, so a rename
+     * is just a move within the same folder. Returns the new project-relative path.
+     */
+    fun movePath(projectId: String, fromRelativePath: String, toRelativePath: String): String {
+        val source = resolveInProject(projectId, fromRelativePath)
+        val target = resolveInProject(projectId, toRelativePath)
+        requireMutable(projectId, source)
+        if (!source.exists()) throw IllegalArgumentException("'$fromRelativePath' does not exist")
+        if (target == source) return relativePathOf(projectId, target)
+        if (target.exists()) throw IllegalArgumentException("'${relativePathOf(projectId, target)}' already exists")
+        if (source.isDirectory && target.path.startsWith(source.path + File.separator)) {
+            throw IllegalArgumentException("A folder cannot be moved into itself")
+        }
+        if (target.parentFile == getProjectDir(projectId).canonicalFile && target.name in STRUCTURAL_DIRS) {
+            throw IllegalArgumentException("'${target.name}' is reserved for the project layout")
+        }
+        target.parentFile?.mkdirs()
+        if (!source.renameTo(target)) {
+            source.copyRecursively(target, overwrite = false)
+            source.deleteRecursively()
+        }
+        return relativePathOf(projectId, target)
+    }
+
+    /** Deletes a file, or a folder and everything in it. The project's own layout is protected. */
+    fun deleteFile(projectId: String, relativePath: String): Boolean {
+        val target = resolveInProject(projectId, relativePath)
+        requireMutable(projectId, target)
         return if (target.isDirectory) target.deleteRecursively() else target.delete()
+    }
+
+    /**
+     * Copies an incoming stream (a file picked through the system picker) into [destDirRelativePath].
+     * An existing file is never overwritten; the copy gets a " (1)" suffix instead.
+     */
+    fun importFile(projectId: String, destDirRelativePath: String, displayName: String, input: InputStream): String {
+        val destDir = resolveInProject(projectId, destDirRelativePath)
+        if (!destDir.isDirectory) throw IllegalArgumentException("'$destDirRelativePath' is not a folder")
+        val target = uniqueChild(destDir, sanitizeName(displayName))
+        // resolveInProject already contains destDir, and a sanitized name has no separators,
+        // but check the final path anyway rather than reason about it.
+        resolveInProject(projectId, relativePathOf(projectId, target))
+
+        val tempFile = File(destDir, ".${target.name}.importing_${System.nanoTime()}")
+        try {
+            FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+            if (!tempFile.renameTo(target)) {
+                tempFile.copyTo(target, overwrite = false)
+            }
+        } finally {
+            tempFile.delete()
+        }
+        return relativePathOf(projectId, target)
+    }
+
+    /** Opens a project file for streaming out, e.g. to a document the user picked. */
+    fun openForExport(projectId: String, relativePath: String): InputStream {
+        val target = resolveInProject(projectId, relativePath)
+        if (!target.isFile) throw IllegalArgumentException("'$relativePath' is not a file")
+        return BufferedInputStream(FileInputStream(target))
+    }
+
+    private fun requireMutable(projectId: String, target: File) {
+        val root = getProjectDir(projectId).canonicalFile
+        if (target == root) throw SecurityException("The project folder itself cannot be changed")
+        if (target.parentFile == root && target.name in STRUCTURAL_DIRS) {
+            throw SecurityException("'${target.name}' is part of the project layout and cannot be moved or deleted")
+        }
     }
 
     fun deleteProject(projectId: String): Boolean {
         return getProjectDir(projectId).deleteRecursively()
     }
 
-    fun exportProjectZip(projectId: String, destStream: OutputStream) {
-        val root = getProjectDir(projectId).canonicalFile
-        ZipOutputStream(BufferedOutputStream(destStream)).use { zos ->
-            // Include source, data, config
-            listOf("source", "data", "config").forEach { folderName ->
-                val folder = File(root, folderName)
-                if (folder.exists()) {
-                    addFolderToZip(folder, folderName, zos)
-                }
-            }
-        }
-    }
+    companion object {
+        /** Folders every project has. Their contents are editable; the folders themselves are not. */
+        val STRUCTURAL_DIRS = listOf("source", "data", "config", "logs", "cache", "backups")
 
-    private fun addFolderToZip(folder: File, parentPath: String, zos: ZipOutputStream) {
-        folder.listFiles()?.forEach { file ->
-            val entryPath = "$parentPath/${file.name}"
-            if (file.isDirectory) {
-                zos.putNextEntry(ZipEntry("$entryPath/"))
-                zos.closeEntry()
-                addFolderToZip(file, entryPath, zos)
-            } else {
-                zos.putNextEntry(ZipEntry(entryPath))
-                BufferedInputStream(FileInputStream(file)).use { bis ->
-                    bis.copyTo(zos)
-                }
-                zos.closeEntry()
-            }
-        }
-    }
+        /** Largest file handed to a text consumer (the MCP bridge). The editor uses a lower limit. */
+        const val MAX_TEXT_BYTES = 1L * 1024 * 1024
 
-    /**
-     * Imports ZIP into a project, safeguarding against Zip-Slip vulnerabilities.
-     */
-    fun extractZipSafely(inputStream: InputStream, destinationDir: File) {
-        val destCanonical = destinationDir.canonicalFile
-        ZipInputStream(BufferedInputStream(inputStream)).use { zis ->
-            var entry = zis.nextEntry
-            while (entry != null) {
-                val newFile = File(destCanonical, entry.name).canonicalFile
-                if (!newFile.path.startsWith(destCanonical.path)) {
-                    throw SecurityException("Zip Slip vulnerability detected in entry: ${entry.name}")
-                }
-                if (entry.isDirectory) {
-                    newFile.mkdirs()
-                } else {
-                    newFile.parentFile?.mkdirs()
-                    FileOutputStream(newFile).use { fos ->
-                        zis.copyTo(fos)
-                    }
-                }
-                zis.closeEntry()
-                entry = zis.nextEntry
+        /**
+         * Rejects names that could smuggle a path: separators, `.`/`..`, NUL, or nothing at all.
+         * Used for every name a person or a picker supplies.
+         */
+        fun validateName(name: String): String {
+            val trimmed = name.trim()
+            require(trimmed.isNotEmpty()) { "Name cannot be empty" }
+            require(trimmed != "." && trimmed != "..") { "'$trimmed' is not a valid name" }
+            require(trimmed.none { it == '/' || it == '\\' || it == Char(0) }) { "Names cannot contain / or \\" }
+            require(trimmed.length <= 255) { "Name is too long" }
+            return trimmed
+        }
+
+        /** Like [validateName], but repairs a picker-supplied name instead of refusing it. */
+        fun sanitizeName(name: String): String {
+            val cleaned = name.map { if (it == '/' || it == '\\' || it == Char(0)) '_' else it }
+                .joinToString("").trim().take(255)
+            return if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") "imported_file" else cleaned
+        }
+
+        fun formatSize(bytes: Long): String = when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
+            else -> String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+        }
+
+        fun uniqueChild(dir: File, name: String): File {
+            var candidate = File(dir, name)
+            if (!candidate.exists()) return candidate
+            val dot = name.lastIndexOf('.')
+            val stem = if (dot > 0) name.substring(0, dot) else name
+            val ext = if (dot > 0) name.substring(dot) else ""
+            var n = 1
+            while (candidate.exists()) {
+                candidate = File(dir, "$stem ($n)$ext")
+                n++
             }
+            return candidate
+        }
+
+        /** A NUL byte in the first 8 KB: images, archives, SQLite files and UTF-16 all have one. */
+        fun looksBinary(file: File): Boolean {
+            if (file.length() == 0L) return false
+            val buffer = ByteArray(8192)
+            val read = FileInputStream(file).use { it.read(buffer) }
+            for (i in 0 until read) if (buffer[i] == 0.toByte()) return true
+            return false
         }
     }
 }
+
+enum class FileKind { MISSING, DIRECTORY, TEXT, BINARY, TOO_LARGE }
+
+data class FileInfo(val kind: FileKind, val size: Long)
 
 data class FileNode(
     val name: String,

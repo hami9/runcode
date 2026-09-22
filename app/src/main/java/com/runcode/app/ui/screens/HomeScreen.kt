@@ -107,7 +107,8 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column {
+                            // Weighted so the title wraps instead of squeezing the button to "Ne/w".
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Box(
                                         modifier = Modifier

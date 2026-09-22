@@ -1,7 +1,11 @@
 package com.runcode.app.mcp
 
 import com.runcode.app.domain.models.Project
+import com.runcode.app.storage.EntryPointEffect
+import com.runcode.app.storage.EntryPoints
+import com.runcode.app.storage.FileKind
 import com.runcode.app.storage.FileNode
+import com.runcode.app.storage.ProjectStorage
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -39,7 +43,8 @@ object McpTools {
         tools.put(
             tool(
                 "list_files",
-                "List the source files of a project as a flat array of relative paths.",
+                "List every file and folder in a project as paths relative to the project root. " +
+                    "Folders end in '/'. Code lives in source/, the app's databases and outputs in data/.",
                 properties("project_id" to stringProp("Project id")),
                 required = listOf("project_id")
             )
@@ -48,7 +53,8 @@ object McpTools {
         tools.put(
             tool(
                 "read_file",
-                "Read a text file inside a project. Paths are relative to the project root, e.g. source/main.py.",
+                "Read a text file inside a project. Paths are relative to the project root, e.g. source/main.py. " +
+                    "Binary files and files over 1 MB are refused with their size.",
                 properties(
                     "project_id" to stringProp("Project id"),
                     "path" to stringProp("Path relative to the project root")
@@ -67,6 +73,57 @@ object McpTools {
                     "content" to stringProp("Full new file content")
                 ),
                 required = listOf("project_id", "path", "content")
+            )
+        )
+
+        tools.put(
+            tool(
+                "create_directory",
+                "Create a folder (and any missing parents) inside a project.",
+                properties(
+                    "project_id" to stringProp("Project id"),
+                    "path" to stringProp("Folder path relative to the project root, e.g. source/utils")
+                ),
+                required = listOf("project_id", "path")
+            )
+        )
+
+        tools.put(
+            tool(
+                "rename_path",
+                "Rename or move a file or folder inside a project. Refuses to overwrite. If the project's " +
+                    "entry point moves, the project is updated to follow it.",
+                properties(
+                    "project_id" to stringProp("Project id"),
+                    "from" to stringProp("Current path relative to the project root"),
+                    "to" to stringProp("New path relative to the project root")
+                ),
+                required = listOf("project_id", "from", "to")
+            )
+        )
+
+        tools.put(
+            tool(
+                "delete_path",
+                "Delete a file, or a folder and everything in it. The top-level source/, data/, config/, " +
+                    "logs/, cache/ and backups/ folders themselves cannot be deleted.",
+                properties(
+                    "project_id" to stringProp("Project id"),
+                    "path" to stringProp("Path relative to the project root")
+                ),
+                required = listOf("project_id", "path")
+            )
+        )
+
+        tools.put(
+            tool(
+                "set_entry_point",
+                "Choose which file in source/ a project runs. Python profiles need a .py file.",
+                properties(
+                    "project_id" to stringProp("Project id"),
+                    "path" to stringProp("Path relative to the project root, e.g. source/main.py")
+                ),
+                required = listOf("project_id", "path")
             )
         )
 
@@ -163,6 +220,10 @@ object McpTools {
                     args.getString("path"),
                     args.getString("content")
                 )
+                "create_directory" -> createDirectory(host, args.getString("project_id"), args.getString("path"))
+                "rename_path" -> renamePath(host, args.getString("project_id"), args.getString("from"), args.getString("to"))
+                "delete_path" -> deletePath(host, args.getString("project_id"), args.getString("path"))
+                "set_entry_point" -> setEntryPoint(host, args.getString("project_id"), args.getString("path"))
                 "start_service" -> startService(host, args.getString("project_id"))
                 "stop_service" -> stopService(host, args.getString("project_id"))
                 "service_status" -> serviceStatus(host)
@@ -249,21 +310,92 @@ object McpTools {
     private fun flatten(nodes: List<FileNode>): List<String> {
         val out = mutableListOf<String>()
         nodes.forEach { node ->
-            if (node.isDirectory) out.addAll(flatten(node.children)) else out.add(node.relativePath)
+            if (node.isDirectory) {
+                out.add("${node.relativePath}/")
+                out.addAll(flatten(node.children))
+            } else {
+                out.add(node.relativePath)
+            }
         }
         return out
     }
 
     private fun readFile(host: McpToolHost, projectId: String, path: String): JSONObject = runBlocking {
         host.projectOrNull(projectId) ?: return@runBlocking errorResult("No project with id $projectId")
-        val content = host.projectStorage.readFile(projectId, path)
-        if (content.isEmpty()) textResult("(empty or missing file: $path)") else textResult(content)
+        val info = host.projectStorage.inspect(projectId, path)
+        when (info.kind) {
+            FileKind.MISSING -> errorResult("No such file: $path")
+            FileKind.DIRECTORY -> errorResult("$path is a folder; use list_files")
+            FileKind.BINARY -> errorResult("$path is a binary file (${ProjectStorage.formatSize(info.size)}); it cannot be returned as text")
+            FileKind.TOO_LARGE -> errorResult("$path is ${ProjectStorage.formatSize(info.size)}, over the 1 MB limit for read_file")
+            FileKind.TEXT -> {
+                val content = host.projectStorage.readFile(projectId, path)
+                textResult(content.ifEmpty { "(empty file: $path)" })
+            }
+        }
     }
 
     private fun writeFile(host: McpToolHost, projectId: String, path: String, content: String): JSONObject = runBlocking {
         host.projectOrNull(projectId) ?: return@runBlocking errorResult("No project with id $projectId")
         host.projectStorage.writeFileAtomically(projectId, path, content)
-        textResult("Wrote ${content.toByteArray().size} bytes to $path")
+        host.onProjectChanged(projectId)
+        textResult("Wrote ${content.toByteArray().size} bytes to ${host.projectStorage.normalize(projectId, path)}")
+    }
+
+    private fun createDirectory(host: McpToolHost, projectId: String, path: String): JSONObject = runBlocking {
+        host.projectOrNull(projectId) ?: return@runBlocking errorResult("No project with id $projectId")
+        val created = host.projectStorage.createDirectory(projectId, path)
+        host.onProjectChanged(projectId)
+        textResult("Created folder $created/")
+    }
+
+    private fun renamePath(host: McpToolHost, projectId: String, from: String, to: String): JSONObject = runBlocking {
+        val project = host.projectOrNull(projectId) ?: return@runBlocking errorResult("No project with id $projectId")
+        val source = host.projectStorage.normalize(projectId, from)
+        val target = host.projectStorage.movePath(projectId, source, to)
+        val note = when (val effect = EntryPoints.follow(project, source, target)) {
+            EntryPointEffect.Unaffected -> ""
+            is EntryPointEffect.Moved -> {
+                host.appMetaDatabase.insertOrUpdateProject(effect.project)
+                " The project's entry point now follows it: ${effect.project.entryPoint}."
+            }
+            EntryPointEffect.Lost -> " Warning: that was the entry point and it is no longer in source/, " +
+                "so the service will not start until it is moved back or set_entry_point picks another file."
+        }
+        host.onProjectChanged(projectId)
+        textResult("Moved $source -> $target.$note")
+    }
+
+    private fun deletePath(host: McpToolHost, projectId: String, path: String): JSONObject = runBlocking {
+        val project = host.projectOrNull(projectId) ?: return@runBlocking errorResult("No project with id $projectId")
+        val source = host.projectStorage.normalize(projectId, path)
+        if (!host.projectStorage.resolveInProject(projectId, source).exists()) {
+            return@runBlocking errorResult("No such file or folder: $source")
+        }
+        if (!host.projectStorage.deleteFile(projectId, source)) {
+            return@runBlocking errorResult("Could not delete $source")
+        }
+        val note = if (EntryPoints.follow(project, source, null) == EntryPointEffect.Lost) {
+            " Warning: that was the project's entry point, so the service will not start until it is " +
+                "recreated or set_entry_point picks another file."
+        } else {
+            ""
+        }
+        host.onProjectChanged(projectId)
+        textResult("Deleted $source.$note")
+    }
+
+    private fun setEntryPoint(host: McpToolHost, projectId: String, path: String): JSONObject = runBlocking {
+        val project = host.projectOrNull(projectId) ?: return@runBlocking errorResult("No project with id $projectId")
+        val target = host.projectStorage.normalize(projectId, path)
+        EntryPoints.problemWith(project, target)?.let { return@runBlocking errorResult(it) }
+        if (!host.projectStorage.resolveInProject(projectId, target).isFile) {
+            return@runBlocking errorResult("No such file: $target")
+        }
+        val updated = project.copy(entryPoint = target.removePrefix("source/"), updatedAt = System.currentTimeMillis())
+        host.appMetaDatabase.insertOrUpdateProject(updated)
+        host.onProjectChanged(projectId)
+        textResult("Entry point of '${project.name}' is now ${updated.entryPoint}")
     }
 
     private fun startService(host: McpToolHost, projectId: String): JSONObject = runBlocking {

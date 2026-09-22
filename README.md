@@ -40,6 +40,29 @@ The APK is large — CPython plus the bundled wheels, for `arm64-v8a` and `x86_6
 Python scripts run as `__main__` with the project directory as the working directory, so
 relative paths like `data/tasks.sqlite` resolve the way they would on a desktop.
 
+## Files
+
+**Editor → folder icon** opens the project's file manager. It shows the whole project, not
+just `source/`, so whatever a script writes into `data/` is visible too.
+
+- Create files and folders (`utils/helpers.py` creates the folder as well), rename, move and
+  delete. `source/`, `data/`, `config/`, `logs/`, `cache/` and `backups/` themselves are
+  part of the layout and cannot be renamed or deleted; their contents can.
+- Renaming or moving the entry point takes the project with it. **⋮ → Set as entry point**
+  picks a different file.
+- **Import files here** copies files in from the phone through the system picker; an existing
+  file is never overwritten. **Save a copy to phone** does the reverse, for any file,
+  including databases and other binaries.
+- **⋮ → Export project (.zip)** writes the code, data and settings to a zip.
+  **Projects → import icon** brings a zip back as a new project. Any other zip works too — a
+  GitHub "Download ZIP" becomes a Python project with its entry point detected. Imports are
+  checked for paths that escape the project and capped in size; imported projects never
+  start on boot until you turn that on.
+- Exports never contain secrets: a secret environment variable is exported only as its
+  `${SEC_...}` reference, and the vault stays on the device.
+
+Binary files and files over 512 KB do not open in the editor; they can still be saved out.
+
 ## MCP bridge
 
 **System → MCP Bridge → Start bridge.** The endpoint is JSON-RPC 2.0 over HTTP:
@@ -50,9 +73,12 @@ Authorization: Bearer <token from the System screen>
 Content-Type: application/json
 ```
 
-Twelve tools: `list_projects`, `get_project`, `list_files`, `read_file`, `write_file`,
-`start_service`, `stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`,
-`sql_query`.
+Sixteen tools: `list_projects`, `get_project`, `list_files`, `read_file`, `write_file`,
+`create_directory`, `rename_path`, `delete_path`, `set_entry_point`, `start_service`,
+`stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`.
+
+File changes made over the bridge show up in the app straight away: the file tree refreshes,
+and a file open in the editor reloads unless it has unsaved edits.
 
 ### Connecting from a computer
 
@@ -92,7 +118,7 @@ app/src/main/java/com/runcode/app/
   supervisor/  ServiceSupervisor — lifecycle, restart policy, ports, wake lock
   terminal/    TerminalSession — interactive sh plus one-shot command runner
   mcp/         McpServer (JSON-RPC over HTTP), McpTools, McpToolHost
-  storage/     Project files, atomic writes, zip import/export
+  storage/     Path-checked project files, zip import/export, entry-point tracking
   database/    App metadata DB and the project SQLite browser
   security/    Keystore-backed secret vault, log redaction
   ui/          Compose screens

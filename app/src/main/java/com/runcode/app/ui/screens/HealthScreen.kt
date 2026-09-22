@@ -59,6 +59,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.runcode.app.mcp.McpTools
 import com.runcode.app.ui.MainViewModel
 import com.runcode.app.ui.theme.AccentCyan
 import com.runcode.app.ui.theme.AccentGreen
@@ -456,7 +457,7 @@ private fun McpBridgeCard(viewModel: MainViewModel) {
 
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "12 tools: projects, files, services, logs, shell, Python and SQL. " +
+                text = "${McpTools.descriptors().length()} tools: projects, files, services, logs, shell, Python and SQL. " +
                     "Point your MCP client at the endpoint above with header " +
                     "Authorization: Bearer <token>.",
                 fontSize = 10.sp,

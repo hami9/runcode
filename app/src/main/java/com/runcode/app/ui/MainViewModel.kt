@@ -1,6 +1,8 @@
 package com.runcode.app.ui
 
 import android.app.Application
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.runcode.app.RuncodeApp
@@ -14,14 +16,16 @@ import com.runcode.app.domain.models.RuntimeInstance
 import com.runcode.app.domain.models.TableInfo
 import com.runcode.app.mcp.McpServerState
 import com.runcode.app.runtime.PythonEngine
+import com.runcode.app.storage.EntryPointEffect
+import com.runcode.app.storage.EntryPoints
+import com.runcode.app.storage.FileKind
 import com.runcode.app.storage.FileNode
+import com.runcode.app.storage.ProjectStorage
 import com.runcode.app.terminal.TerminalLine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -126,6 +130,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         loadProjects()
         refreshCapabilities()
+        viewModelScope.launch {
+            app.projectChanges.collect { projectId -> onExternalProjectChange(projectId) }
+        }
     }
 
     // ---------------------------------------------------------------- terminal
@@ -210,15 +217,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshProjectFiles(projectId: String) {
         viewModelScope.launch {
-            val nodes = app.projectStorage.listProjectFiles(projectId)
-            _projectFiles.value = nodes
+            val nodes = withContext(Dispatchers.IO) { app.projectStorage.listProjectFiles(projectId) }
+            if (_selectedProject.value?.id == projectId) _projectFiles.value = nodes
         }
     }
 
     fun openFile(projectId: String, relativePath: String) {
         viewModelScope.launch {
             try {
-                val content = app.projectStorage.readFile(projectId, relativePath)
+                val info = withContext(Dispatchers.IO) {
+                    app.projectStorage.inspect(projectId, relativePath, EDITOR_MAX_BYTES)
+                }
+                val name = File(relativePath).name
+                when (info.kind) {
+                    FileKind.DIRECTORY -> return@launch
+                    FileKind.BINARY -> {
+                        _userMessage.value = "$name is a binary file (${ProjectStorage.formatSize(info.size)}) and can't be " +
+                            "edited as text. Use ⋮ → Save a copy to get it out."
+                        return@launch
+                    }
+                    FileKind.TOO_LARGE -> {
+                        _userMessage.value = "$name is ${ProjectStorage.formatSize(info.size)}, too large for the editor " +
+                            "(limit ${ProjectStorage.formatSize(EDITOR_MAX_BYTES)}). Use ⋮ → Save a copy instead."
+                        return@launch
+                    }
+                    FileKind.TEXT, FileKind.MISSING -> Unit
+                }
+
+                // Switching tabs used to drop unsaved edits silently. Save them instead.
+                if (_isDirty.value && _activeTab.value != relativePath) {
+                    persistCurrentFile(announce = false)
+                }
+
+                val content = withContext(Dispatchers.IO) { app.projectStorage.readFile(projectId, relativePath) }
                 val currentTabs = _openTabs.value.toMutableList()
                 if (!currentTabs.contains(relativePath)) {
                     currentTabs.add(relativePath)
@@ -236,6 +267,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeTab(tab: String) {
+        viewModelScope.launch {
+            // Closing the tab you are typing in should not throw the typing away.
+            if (_isDirty.value && _activeTab.value == tab) persistCurrentFile(announce = false)
+            removeTab(tab)
+        }
+    }
+
+    private fun removeTab(tab: String) {
         val currentTabs = _openTabs.value.toMutableList()
         val index = currentTabs.indexOf(tab)
         if (index != -1) {
@@ -303,32 +342,291 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createNewFile(name: String) {
+    // ---------------------------------------------------------------- file manager
+
+    /** Creates an empty file. [name] may contain folders, e.g. `utils/helpers.py`. */
+    fun createNewFile(parentDir: String, name: String) {
         val project = _selectedProject.value ?: return
         viewModelScope.launch {
             try {
-                val rel = "source/$name"
-                app.projectStorage.writeFileAtomically(project.id, rel, "")
+                val rel = withContext(Dispatchers.IO) {
+                    val path = joinPath(parentDir, name)
+                    if (app.projectStorage.resolveInProject(project.id, path).exists()) {
+                        // This used to overwrite the existing file with an empty one.
+                        throw IllegalArgumentException("'$path' already exists")
+                    }
+                    app.projectStorage.writeFileAtomically(project.id, path, "")
+                    app.projectStorage.normalize(project.id, path)
+                }
                 refreshProjectFiles(project.id)
                 openFile(project.id, rel)
             } catch (e: Exception) {
-                _userMessage.value = "Create file error: ${e.message}"
+                _userMessage.value = "Create file failed: ${e.message}"
             }
         }
     }
 
-    fun deleteCurrentFile(relPath: String) {
+    fun createFolder(parentDir: String, name: String) {
         val project = _selectedProject.value ?: return
         viewModelScope.launch {
             try {
-                app.projectStorage.deleteFile(project.id, relPath)
-                closeTab(relPath)
+                val rel = withContext(Dispatchers.IO) {
+                    val path = joinPath(parentDir, name)
+                    if (app.projectStorage.resolveInProject(project.id, path).exists()) {
+                        throw IllegalArgumentException("'$path' already exists")
+                    }
+                    app.projectStorage.createDirectory(project.id, path)
+                }
                 refreshProjectFiles(project.id)
-                _userMessage.value = "Deleted ${File(relPath).name}"
+                _userMessage.value = "Created folder $rel"
             } catch (e: Exception) {
-                _userMessage.value = "Delete error: ${e.message}"
+                _userMessage.value = "Create folder failed: ${e.message}"
             }
         }
+    }
+
+    fun renamePath(relPath: String, newName: String) {
+        val to = try {
+            joinPath(relPath.substringBeforeLast('/', ""), ProjectStorage.validateName(newName))
+        } catch (e: IllegalArgumentException) {
+            _userMessage.value = "Rename failed: ${e.message}"
+            return
+        }
+        relocate(relPath, to, "Renamed to")
+    }
+
+    fun movePath(relPath: String, destinationDir: String) {
+        val to = try {
+            joinPath(destinationDir, File(relPath).name)
+        } catch (e: IllegalArgumentException) {
+            _userMessage.value = "Move failed: ${e.message}"
+            return
+        }
+        relocate(relPath, to, "Moved to")
+    }
+
+    private fun relocate(from: String, to: String, verb: String) {
+        val project = _selectedProject.value ?: return
+        viewModelScope.launch {
+            try {
+                val (source, target) = withContext(Dispatchers.IO) {
+                    val source = app.projectStorage.normalize(project.id, from)
+                    source to app.projectStorage.movePath(project.id, source, to)
+                }
+                remapOpenTabs(project.id, source, target)
+                val entryNote = applyEntryPointEffect(EntryPoints.follow(project, source, target))
+                refreshProjectFiles(project.id)
+                _userMessage.value = listOfNotNull("$verb $target", entryNote).joinToString(". ")
+            } catch (e: Exception) {
+                _userMessage.value = "${verb.substringBefore(' ')} failed: ${e.message}"
+            }
+        }
+    }
+
+    fun deletePath(relPath: String) {
+        val project = _selectedProject.value ?: return
+        viewModelScope.launch {
+            try {
+                val source = withContext(Dispatchers.IO) {
+                    val source = app.projectStorage.normalize(project.id, relPath)
+                    if (!app.projectStorage.deleteFile(project.id, source)) {
+                        throw IllegalStateException("could not delete $source")
+                    }
+                    source
+                }
+                remapOpenTabs(project.id, source, null)
+                val entryNote = applyEntryPointEffect(EntryPoints.follow(project, source, null))
+                refreshProjectFiles(project.id)
+                _userMessage.value = listOfNotNull("Deleted $source", entryNote).joinToString(". ")
+            } catch (e: Exception) {
+                _userMessage.value = "Delete failed: ${e.message}"
+            }
+        }
+    }
+
+    fun setEntryPoint(relPath: String) {
+        val project = _selectedProject.value ?: return
+        EntryPoints.problemWith(project, relPath)?.let {
+            _userMessage.value = it
+            return
+        }
+        viewModelScope.launch {
+            val updated = project.copy(entryPoint = relPath.removePrefix("source/"), updatedAt = System.currentTimeMillis())
+            saveProjectSettings(updated)
+            _userMessage.value = "Entry point is now ${updated.entryPoint}"
+        }
+    }
+
+    /** Copies files chosen in the system picker into [destinationDir]. */
+    fun importFiles(uris: List<Uri>, destinationDir: String) {
+        val project = _selectedProject.value ?: return
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            val results = withContext(Dispatchers.IO) {
+                uris.map { uri ->
+                    runCatching {
+                        val name = displayNameOf(uri) ?: uri.lastPathSegment ?: "imported_file"
+                        app.contentResolver.openInputStream(uri)?.use { input ->
+                            app.projectStorage.importFile(project.id, destinationDir, name, input)
+                        } ?: throw IllegalStateException("could not open $name")
+                    }
+                }
+            }
+            refreshProjectFiles(project.id)
+            val imported = results.mapNotNull { it.getOrNull() }
+            val failures = results.mapNotNull { it.exceptionOrNull()?.message }
+            _userMessage.value = when {
+                failures.isEmpty() && imported.size == 1 -> "Imported ${imported.first()}"
+                failures.isEmpty() -> "Imported ${imported.size} files into $destinationDir"
+                else -> "Imported ${imported.size}, ${failures.size} failed: ${failures.first()}"
+            }
+        }
+    }
+
+    /** Writes one project file to a document the user created in the system picker. */
+    fun exportFile(relPath: String, destination: Uri) {
+        val project = _selectedProject.value ?: return
+        viewModelScope.launch {
+            try {
+                if (_isDirty.value && _activeTab.value == relPath) persistCurrentFile(announce = false)
+                withContext(Dispatchers.IO) {
+                    app.projectStorage.openForExport(project.id, relPath).use { input ->
+                        val output = app.contentResolver.openOutputStream(destination)
+                            ?: throw IllegalStateException("the destination could not be opened")
+                        output.use { input.copyTo(it) }
+                    }
+                }
+                _userMessage.value = "Saved a copy of ${File(relPath).name}"
+            } catch (e: Exception) {
+                _userMessage.value = "Save a copy failed: ${e.message}"
+            }
+        }
+    }
+
+    fun exportProject(destination: Uri) {
+        val project = _selectedProject.value ?: return
+        viewModelScope.launch {
+            try {
+                if (_isDirty.value) persistCurrentFile(announce = false)
+                withContext(Dispatchers.IO) {
+                    val output = app.contentResolver.openOutputStream(destination)
+                        ?: throw IllegalStateException("the destination could not be opened")
+                    output.use { app.projectArchive.export(project, it) }
+                }
+                _userMessage.value = "Exported '${project.name}'. Secret values stay on this device."
+            } catch (e: Exception) {
+                _userMessage.value = "Export failed: ${e.message}"
+            }
+        }
+    }
+
+    /** [onImported] runs only on success, so a failed import does not navigate anywhere. */
+    fun importProject(source: Uri, onImported: () -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                val fallbackName = displayNameOf(source)?.substringBeforeLast('.') ?: "Imported project"
+                val project = withContext(Dispatchers.IO) {
+                    val input = app.contentResolver.openInputStream(source)
+                        ?: throw IllegalStateException("the file could not be opened")
+                    input.use { app.projectArchive.import(it, fallbackName) }
+                }
+                app.appMetaDatabase.insertOrUpdateProject(project)
+                _projects.value = app.appMetaDatabase.getAllProjects()
+                selectProject(project)
+                onImported()
+                _userMessage.value = "Imported '${project.name}' (entry point ${project.entryPoint}). Read the code before running it."
+            } catch (e: Exception) {
+                _userMessage.value = "Import failed: ${e.message}"
+            }
+        }
+    }
+
+    /** Keeps open tabs pointing at files after a move, and drops tabs whose file is gone. */
+    private fun remapOpenTabs(projectId: String, from: String, to: String?) {
+        fun mapped(tab: String): String? = when {
+            tab == from -> to
+            tab.startsWith("$from/") -> to?.let { it + tab.removePrefix(from) }
+            else -> tab
+        }
+
+        val active = _activeTab.value
+        val tabs = _openTabs.value.mapNotNull { mapped(it) }.distinct()
+        _openTabs.value = tabs
+        if (active == null) return
+
+        val newActive = mapped(active)
+        if (newActive != null) {
+            // Same buffer, new path: unsaved edits are kept and will be saved to the new location.
+            _activeTab.value = newActive
+            return
+        }
+
+        // The open file was deleted, and its unsaved edits with it.
+        _isDirty.value = false
+        undoStack.clear()
+        redoStack.clear()
+        val next = tabs.firstOrNull()
+        if (next != null) {
+            openFile(projectId, next)
+        } else {
+            _activeTab.value = null
+            _editorContent.value = ""
+        }
+    }
+
+    /** Returns a note for the user when the entry point moved or disappeared. */
+    private suspend fun applyEntryPointEffect(effect: EntryPointEffect): String? = when (effect) {
+        EntryPointEffect.Unaffected -> null
+        is EntryPointEffect.Moved -> {
+            saveProjectSettings(effect.project)
+            "Entry point is now ${effect.project.entryPoint}"
+        }
+        EntryPointEffect.Lost -> "That was the entry point: pick a new one with ⋮ → Set as entry point before running"
+    }
+
+    private suspend fun saveProjectSettings(project: Project) {
+        app.appMetaDatabase.insertOrUpdateProject(project)
+        _projects.value = _projects.value.map { if (it.id == project.id) project else it }
+        if (_selectedProject.value?.id == project.id) _selectedProject.value = project
+    }
+
+    /** Something outside the UI (the MCP bridge) changed a project's files or settings. */
+    private suspend fun onExternalProjectChange(projectId: String) {
+        val list = app.appMetaDatabase.getAllProjects()
+        _projects.value = list
+        val selected = _selectedProject.value ?: return
+        if (selected.id != projectId) return
+        val fresh = list.find { it.id == projectId } ?: return
+        _selectedProject.value = fresh
+        refreshProjectFiles(projectId)
+
+        // Show an AI client's edit to the open file, unless there are unsaved edits here.
+        val tab = _activeTab.value ?: return
+        if (_isDirty.value) return
+        val onDisk = withContext(Dispatchers.IO) {
+            val info = app.projectStorage.inspect(projectId, tab, EDITOR_MAX_BYTES)
+            if (info.kind == FileKind.TEXT) app.projectStorage.readFile(projectId, tab) else null
+        } ?: return
+        if (onDisk != _editorContent.value && !_isDirty.value && _activeTab.value == tab) {
+            _editorContent.value = onDisk
+            undoStack.clear()
+            redoStack.clear()
+        }
+    }
+
+    private fun displayNameOf(uri: Uri): String? = try {
+        app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Joins a folder and a name that may itself contain folders, validating every segment. */
+    private fun joinPath(parentDir: String, name: String): String {
+        val segments = name.trim().trim('/').split('/').map { ProjectStorage.validateName(it) }
+        val parent = parentDir.trim('/')
+        return (if (parent.isEmpty()) segments else listOf(parent) + segments).joinToString("/")
     }
 
     fun createProject(
@@ -496,5 +794,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val MCP_PORT = 8765
+
+        /** Above this the editor gets sluggish, and every undo step keeps a full copy. */
+        const val EDITOR_MAX_BYTES = 512L * 1024
     }
 }
