@@ -79,10 +79,13 @@ class ProjectStorageTest {
 
     @Test fun `metadata rejects secret plaintext`() {
         val project = storage.createProjectFromTemplate("meta", ProjectProfile.PYTHON_SCRIPT)
-        AppMetaDatabase(RuntimeEnvironment.getApplication()).use { db ->
+        val db = AppMetaDatabase(RuntimeEnvironment.getApplication())
+        try {
             assertThrows(IllegalArgumentException::class.java) {
                 runBlocking { db.insertOrUpdateProject(project.copy(environment = listOf(EnvironmentVariable("TOKEN", "plaintext", true)))) }
             }
+        } finally {
+            db.close()
         }
     }
 
