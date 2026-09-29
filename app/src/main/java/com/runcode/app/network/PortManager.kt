@@ -56,9 +56,16 @@ class PortManager {
         throw IllegalStateException("No open developer port found in range 8080-8999")
     }
 
+    /**
+     * Address other devices on the local network can reach, or 127.0.0.1 when there is none.
+     *
+     * Interface order is arbitrary, so taking the first IPv4 address often picked the mobile
+     * data interface, whose carrier-assigned address nothing on the Wi-Fi can reach.
+     */
     fun getLanIp(): String {
         return try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
+            val candidates = mutableListOf<LanCandidate>()
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return LOOPBACK
             while (interfaces.hasMoreElements()) {
                 val iface = interfaces.nextElement()
                 if (iface.isLoopback || !iface.isUp) continue
@@ -66,13 +73,50 @@ class PortManager {
                 while (addresses.hasMoreElements()) {
                     val addr = addresses.nextElement()
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        return addr.hostAddress ?: "127.0.0.1"
+                        val host = addr.hostAddress ?: continue
+                        candidates += LanCandidate(iface.name, host, addr.isSiteLocalAddress)
                     }
                 }
             }
-            "127.0.0.1"
+            selectLanIp(candidates) ?: LOOPBACK
         } catch (_: Exception) {
-            "127.0.0.1"
+            LOOPBACK
+        }
+    }
+
+    data class LanCandidate(val interfaceName: String, val address: String, val isPrivate: Boolean)
+
+    companion object {
+        private const val LOOPBACK = "127.0.0.1"
+
+        // Wi-Fi, hotspot and Ethernet, then USB/Bluetooth tethering and Wi-Fi Direct.
+        private val LAN_PREFIXES = listOf("wlan", "swlan", "ap", "softap", "eth")
+        private val TETHER_PREFIXES = listOf("rndis", "usb", "ncm", "bt-pan", "p2p")
+
+        // Mobile data (rmnet/ccmni/...), 464xlat, VPN tunnels and virtual links.
+        private val UNREACHABLE_PREFIXES = listOf(
+            "rmnet", "ccmni", "pdp", "seth", "clat", "v4-", "tun", "ppp", "ipsec", "dummy", "ifb"
+        )
+
+        /** Picks the most reachable address, or null when only unreachable ones exist. */
+        fun selectLanIp(candidates: List<LanCandidate>): String? {
+            return candidates
+                .mapNotNull { candidate -> rank(candidate)?.let { it to candidate } }
+                .minWithOrNull(compareBy<Pair<Int, LanCandidate>> { it.first }.thenBy { !it.second.isPrivate })
+                ?.second
+                ?.address
+        }
+
+        private fun rank(candidate: LanCandidate): Int? {
+            val name = candidate.interfaceName.lowercase()
+            return when {
+                UNREACHABLE_PREFIXES.any { name.startsWith(it) } -> null
+                LAN_PREFIXES.any { name.startsWith(it) } -> 0
+                TETHER_PREFIXES.any { name.startsWith(it) } -> 1
+                // Unknown interface names count only with a private address.
+                candidate.isPrivate -> 2
+                else -> null
+            }
         }
     }
 }
