@@ -57,7 +57,9 @@ class ServiceSupervisor(
     }
 
     suspend fun startProject(project: Project): Boolean = mutex.withLock {
-        if (activeHandles[project.id]?.isAlive == true) return false
+        // The lifecycle watcher still owns an exited worker until it records the outcome.
+        // Cancelling it here would leave RUNNING state with no worker and no watcher.
+        if (activeHandles.containsKey(project.id)) return false
         supervisorJobs.remove(project.id)?.cancel()
         startProjectLocked(project, 0)
     }
@@ -452,7 +454,7 @@ class ServiceSupervisor(
     }
 
     suspend fun stopAll() {
-        activeHandles.keys().toList().forEach { projectId ->
+        (activeHandles.keys + supervisorJobs.keys).toSet().forEach { projectId ->
             stopProject(projectId)
         }
     }

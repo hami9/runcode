@@ -27,8 +27,8 @@ import java.util.zip.ZipOutputStream
  * "Download ZIP", a folder zipped on a laptop — is imported as a new Python project with
  * its contents as the source code.
  *
- * Unlike a backup (.rcpkg) this is meant to leave the device, so it never contains a secret:
- * the vault stays behind, and a secret variable is exported only as its `${SEC_...}` reference.
+ * The vault stays on the device, and a secret variable is exported only as its `${SEC_...}`
+ * reference. Project files are copied unchanged and may contain user-written sensitive data.
  */
 class ProjectArchive(
     private val context: Context,

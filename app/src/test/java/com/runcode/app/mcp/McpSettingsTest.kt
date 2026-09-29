@@ -23,7 +23,7 @@ class McpSettingsTest {
     private val notifications = mutableListOf<String>()
 
     @Before fun setup() {
-        app = RuntimeEnvironment.getApplication()
+        app = RuntimeEnvironment.getApplication() as RuncodeApp
         project = app.projectStorage.createProjectFromTemplate("MCP settings", ProjectProfile.PYTHON_SCRIPT).copy(
             environment = listOf(EnvironmentVariable("TOKEN", "\${SEC_PROJECT_test_reference}", true),
                 EnvironmentVariable("OLD", "old", false))

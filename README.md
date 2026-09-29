@@ -63,7 +63,7 @@ just `source/`, so whatever a script writes into `data/` is visible too.
   GitHub "Download ZIP" becomes a Python project with its entry point detected. Imports are
   checked for paths that escape the project and capped in size; imported projects never
   start on boot until you turn that on.
-- Exports never contain secrets: a secret environment variable is exported only as its
+- Secret environment values are excluded from the manifest: a secret variable is exported only as its
   `${SEC_...}` reference, and the vault stays on the device.
 
 Binary files and files over 512 KB do not open in the editor; they can still be saved out.

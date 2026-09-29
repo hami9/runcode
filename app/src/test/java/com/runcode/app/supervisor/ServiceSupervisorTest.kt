@@ -45,7 +45,7 @@ class ServiceSupervisorTest {
     }
 
     private fun TestScope.supervisor(engine: Engine): ServiceSupervisor {
-        val context = RuntimeEnvironment.getApplication<Application>()
+        val context = RuntimeEnvironment.getApplication()
         return ServiceSupervisor(context, RuntimeRegistry(engine, engine), LogManager(context), PortManager(), backgroundScope)
     }
 
@@ -53,6 +53,7 @@ class ServiceSupervisorTest {
         val engine = Engine(Handle())
         val supervisor = supervisor(engine)
         supervisor.startProject(project)
+        assertFalse(supervisor.startProject(project))
         advanceTimeBy(60_000)
         runCurrent()
         assertEquals(5, engine.starts)
@@ -88,6 +89,19 @@ class ServiceSupervisorTest {
         runCurrent()
         assertEquals(ServiceState.STOPPED, supervisor.instances.value[project.id]?.state)
         assertEquals(1, engine.starts)
+    }
+
+    @Test fun `stop all includes services waiting to restart`() = runTest {
+        val engine = Engine(Handle())
+        val supervisor = supervisor(engine)
+        supervisor.startProject(project)
+        advanceTimeBy(3_000)
+        runCurrent()
+        supervisor.stopAll()
+        advanceTimeBy(30_000)
+        runCurrent()
+        assertEquals(1, engine.starts)
+        assertEquals(ServiceState.STOPPED, supervisor.instances.value[project.id]?.state)
     }
 
     @Test fun `always restarts successful scripts but on failure does not`() = runTest {

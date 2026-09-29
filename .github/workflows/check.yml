@@ -2,6 +2,7 @@ name: Check
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -38,3 +39,9 @@ jobs:
           path: |
             app/build/reports/
             app/build/test-results/
+      - name: Save debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk

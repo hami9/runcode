@@ -34,7 +34,7 @@ class EditorSessionTest {
     }
 
     @Test fun `switching projects saves to the old owner and clears its tabs`() {
-        val app = RuntimeEnvironment.getApplication<RuncodeApp>()
+        val app = RuntimeEnvironment.getApplication() as RuncodeApp
         val a = create(app, "project-a")
         val b = create(app, "project-b")
         val model = MainViewModel(app)
@@ -51,7 +51,7 @@ class EditorSessionTest {
     }
 
     @Test fun `failed save prevents project switch and keeps the buffer`() {
-        val app = RuntimeEnvironment.getApplication<RuncodeApp>()
+        val app = RuntimeEnvironment.getApplication() as RuncodeApp
         val a = create(app, "save-failure-a")
         val b = create(app, "save-failure-b")
         val model = MainViewModel(app)

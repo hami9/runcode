@@ -70,9 +70,12 @@ class ProjectSettingsManager(
         }
         // Once vault writes begin, finish the metadata commit or rollback even if the
         // screen closes. Cancellation after a DB commit must not delete referenced keys.
-        withContext(NonCancellable) {
+        withContext(NonCancellable) { persist(current, settings) }
+    }
+
+    private suspend fun persist(current: Project, settings: ProjectSettings): Project {
         val newKeys = mutableListOf<String>()
-        val prefix = "PROJECT_${projectId.replace('-', '_')}_"
+        val prefix = "PROJECT_${current.id.replace('-', '_')}_"
         val updated = try {
             val environment = settings.environment.map { edit ->
                 val value = if (edit.isSecret) {
@@ -109,7 +112,6 @@ class ProjectSettingsManager(
         current.environment.mapNotNull { SecretReferences.key(it.value) }
             .filter { it.startsWith(prefix) && it !in kept }
             .forEach { vault.removeSecret(it) }
-        updated
-        }
+        return updated
     }
 }
