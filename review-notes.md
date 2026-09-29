@@ -31,9 +31,15 @@ secrets and MCP, then implements the project-settings step from the supplied roa
 
 - Five Python regression tests pass locally and on GitHub Actions, including an actual loopback
   HTTP request, cancellation, early stop and concurrent-workload rejection.
-- Android compilation, lint and JVM/Robolectric tests: in progress.
+- All 32 JVM/Robolectric regression tests pass. They cover settings and vault rollback,
+  editor ownership, restart and stop behavior, archive boundaries, redaction and MCP settings.
+- `testDebugUnitTest lintDebug assembleDebug` passes locally on code commit `af2da7f`.
+  Lint reports zero errors and 38 warnings, mainly dependency updates and unused resources.
+- The debug APK is built and its Android Debug signature is verified. Its SHA-256 is
+  `79ec58edc23d6025d525ef6015dab79027e82e3c9580eb9409b091675481c44a`.
+  Local output: `app/build/outputs/apk/debug/app-debug.apk`.
 - API 36 UI, Android Keystore and physical-device validation: pending; no device was connected.
-- Signed release: not created. This change remains a draft PR.
+- Release-signed build: not created. This change remains [draft PR #1](https://github.com/hami9/runcode/pull/1).
 
 ## Remaining work
 
