@@ -188,10 +188,18 @@ class ProjectArchive(
         (0 until array.length()).mapNotNull { index ->
             val obj = array.optJSONObject(index) ?: return@mapNotNull null
             val key = obj.optString("key").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            EnvironmentVariable(key, obj.optString("value"), obj.optBoolean("is_secret", false))
+            val secret = obj.optBoolean("is_secret", false)
+            // An imported project must never inherit another project's vault access,
+            // including an exported reference brought back onto the same device.
+            EnvironmentVariable(key, if (secret) "" else obj.optString("value"), secret)
         }
 
     private fun detectEntryPoint(sourceDir: File, preferred: String?): String {
+        if (!preferred.isNullOrBlank()) {
+            val root = sourceDir.canonicalFile
+            val candidate = File(root, preferred).canonicalFile
+            require(candidate.path.startsWith(root.path + File.separator)) { "Entry point must stay inside source/" }
+        }
         preferred?.takeIf { it.isNotBlank() && File(sourceDir, it).isFile }?.let { return it }
         COMMON_ENTRY_POINTS.firstOrNull { File(sourceDir, it).isFile }?.let { return it }
         val topLevel = sourceDir.listFiles().orEmpty().filter { it.isFile }.sortedBy { it.name.lowercase() }

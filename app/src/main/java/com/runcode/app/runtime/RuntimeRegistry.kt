@@ -3,8 +3,8 @@ package com.runcode.app.runtime
 import com.runcode.app.domain.models.ProjectProfile
 
 class RuntimeRegistry(
-    val pythonEngine: PythonEngine,
-    val staticWebEngine: StaticWebEngine
+    val pythonEngine: RuntimeEngine,
+    val staticWebEngine: RuntimeEngine
 ) {
     private val engines = listOf(pythonEngine, staticWebEngine)
 

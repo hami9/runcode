@@ -24,3 +24,7 @@ Thumbs.db
 
 # Release signing material
 keystore.properties
+
+# Python checks
+__pycache__/
+*.pyc

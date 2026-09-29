@@ -105,7 +105,7 @@ class LogManager(private val context: Context) {
         val list = if (projectId.isNullOrEmpty()) buffer.toList() else buffer.filter { it.projectId == projectId }
         return buildString {
             list.forEach { event ->
-                val timeStr = timeFormat.format(Date(event.timestamp))
+                val timeStr = formatTime(event.timestamp)
                 append("[$timeStr] [${event.level}] [${event.serviceName}] ${event.message}\n")
             }
         }

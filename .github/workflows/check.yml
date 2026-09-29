@@ -1,0 +1,37 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Check Python runtime
+        run: python -m unittest discover -s tests -v
+      - name: Build and test
+        run: |
+          chmod +x gradlew
+          RUNCODE_BUILD_PYTHON="$(command -v python)" ./gradlew testDebugUnitTest lintDebug assembleDebug --console=plain
+      - name: Save reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-reports
+          path: |
+            app/build/reports/
+            app/build/test-results/

@@ -15,6 +15,7 @@ import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.runtime.RuntimeRegistry
 import com.runcode.app.runtime.StaticWebEngine
 import com.runcode.app.security.SecretStore
+import com.runcode.app.settings.ProjectSettingsManager
 import com.runcode.app.storage.ProjectArchive
 import com.runcode.app.storage.ProjectStorage
 import com.runcode.app.supervisor.ServiceSupervisor
@@ -60,6 +61,8 @@ class RuncodeApp : Application() {
         private set
     lateinit var projectArchive: ProjectArchive
         private set
+    lateinit var projectSettings: ProjectSettingsManager
+        private set
 
     private val _projectChanges = MutableSharedFlow<String>(extraBufferCapacity = 64)
 
@@ -81,6 +84,7 @@ class RuncodeApp : Application() {
         projectStorage = ProjectStorage(this)
         portManager = PortManager()
         secretStore = SecretStore(this)
+        secretStore.getAllSecretKeys().forEach { secretStore.getSecret(it) }
         logManager = LogManager(this)
         appMetaDatabase = AppMetaDatabase(this)
         projectDatabaseManager = ProjectDatabaseManager()
@@ -104,6 +108,13 @@ class RuncodeApp : Application() {
             portManager = portManager
         )
 
+        projectSettings = ProjectSettingsManager(
+            secretStore,
+            appMetaDatabase::getProjectById,
+            { appMetaDatabase.insertOrUpdateProject(it) },
+            serviceSupervisor::hasActiveWork
+        )
+
         mcpServer = McpServer(
             tools = McpToolHost(
                 projectStorage = projectStorage,
@@ -113,6 +124,7 @@ class RuncodeApp : Application() {
                 logManager = logManager,
                 terminalSession = terminalSession,
                 runPython = ::runPythonSnippet,
+                projectSettings = projectSettings,
                 onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) }
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
