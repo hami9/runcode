@@ -89,52 +89,13 @@ print("Batch calculations completed successfully!")
             ProjectProfile.TELEGRAM_BOT -> {
                 entryPoint = "bot.py"
                 envList.add(EnvironmentVariable("TELEGRAM_BOT_TOKEN", "\${SEC_BOT_TOKEN}", isSecret = true))
-                val botCode = """
-# Telegram Bot Profile for runcode
-import os
-import time
-import sys
-
-token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-print("Initializing Telegram Bot Service...")
-print(f"Configured Bot Token: {token}")
-
-if not token or token == "${'$'}{SEC_BOT_TOKEN}":
-    print("[WARN] No real bot token provided. Operating in Bot Emulation Mode.")
-    print("Add your Telegram Bot Token in Project Settings -> Environment Secrets.")
-
-print("Starting long-polling event loop...")
-
-# Emulated or real webhook / polling event loop
-step = 0
-while True:
-    step += 1
-    if step % 5 == 0:
-        print(f"[Bot Polling] Listening for updates... (heartbeat #{step})")
-    time.sleep(2)
-""".trimIndent()
+                val botCode = context.assets.open("templates/bot.py").bufferedReader().use { it.readText() }
                 File(sourceDir, entryPoint).writeText(botCode)
             }
 
             ProjectProfile.PYTHON_HTTP -> {
                 entryPoint = "server.py"
-                val serverCode = """
-# Lightweight Python HTTP API for runcode
-import json
-import time
-
-port = $customPort
-print(f"Starting lightweight HTTP service on port {port}...")
-print("Endpoints available:")
-print("  GET  /        - Welcome & service info")
-print("  GET  /status  - Runtime health stats")
-print("  GET  /api     - JSON API response")
-
-# Simulated / embedded HTTP listener loop
-while True:
-    time.sleep(5)
-    print(f"[HTTP Monitor] Service listening on 127.0.0.1:{port} - Active")
-""".trimIndent()
+                val serverCode = context.assets.open("templates/server.py").bufferedReader().use { it.readText() }
                 File(sourceDir, entryPoint).writeText(serverCode)
             }
 
@@ -369,9 +330,14 @@ print("Database operations complete.")
             fos.flush()
             fos.fd.sync()
         }
-        if (target.exists()) target.delete()
-        if (!tempFile.renameTo(target)) {
-            tempFile.copyTo(target, overwrite = true)
+        try {
+            try {
+                java.nio.file.Files.move(tempFile.toPath(), target.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(tempFile.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
             tempFile.delete()
         }
     }

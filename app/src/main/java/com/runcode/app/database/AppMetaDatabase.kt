@@ -94,7 +94,9 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
             put("created_at", project.createdAt)
             put("updated_at", System.currentTimeMillis())
         }
-        writableDatabase.insertWithOnConflict("projects", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+        check(writableDatabase.insertWithOnConflict("projects", null, cv, SQLiteDatabase.CONFLICT_REPLACE) != -1L) {
+            "Could not save project settings"
+        }
     }
 
     suspend fun getAllProjects(): List<Project> = withContext(Dispatchers.IO) {
@@ -166,6 +168,10 @@ class AppMetaDatabase(context: Context) : SQLiteOpenHelper(context, "runcode_met
     private fun encodeEnvironment(environment: List<EnvironmentVariable>): String {
         val array = JSONArray()
         environment.forEach { variable ->
+            require(!variable.isSecret || variable.value.isEmpty() ||
+                com.runcode.app.security.SecretReferences.key(variable.value) != null) {
+                "Secret variables must use a vault reference"
+            }
             array.put(
                 JSONObject()
                     .put("key", variable.key)

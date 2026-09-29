@@ -1,6 +1,10 @@
 package com.runcode.app.mcp
 
 import com.runcode.app.domain.models.Project
+import com.runcode.app.domain.models.RestartPolicy
+import com.runcode.app.security.SecretRedactor
+import com.runcode.app.settings.EnvironmentEdit
+import com.runcode.app.settings.ProjectSettings
 import com.runcode.app.storage.EntryPointEffect
 import com.runcode.app.storage.EntryPoints
 import com.runcode.app.storage.FileKind
@@ -22,6 +26,22 @@ object McpTools {
 
     fun descriptors(): JSONArray {
         val tools = JSONArray()
+
+        tools.put(tool(
+            "update_project_settings",
+            "Update a stopped project's settings. environment replaces only plain variables; secrets are preserved and managed in the app.",
+            properties(
+                "project_id" to stringProp("Project id"),
+                "port" to intProp("Port from 1024 to 65535"),
+                "restart_policy" to stringProp("NEVER, ON_FAILURE or ALWAYS"),
+                "start_on_boot" to JSONObject().put("type", "boolean"),
+                "max_cpu_percent" to intProp("0 (unlimited) to 100"),
+                "max_heap_mb" to intProp("Process-wide Java heap limit; 0 means unlimited"),
+                "idle_timeout_minutes" to intProp("Static web idle timeout; 0 means unlimited"),
+                "environment" to JSONObject().put("type", "object")
+                    .put("additionalProperties", JSONObject().put("type", "string"))
+            ), required = listOf("project_id")
+        ))
 
         tools.put(
             tool(
@@ -212,6 +232,7 @@ object McpTools {
             when (name) {
                 "list_projects" -> listProjects(host)
                 "get_project" -> getProject(host, args.getString("project_id"))
+                "update_project_settings" -> updateSettings(host, args)
                 "list_files" -> listFiles(host, args.getString("project_id"))
                 "read_file" -> readFile(host, args.getString("project_id"), args.getString("path"))
                 "write_file" -> writeFile(
@@ -249,6 +270,40 @@ object McpTools {
     }
 
     // ---------------------------------------------------------------- handlers
+
+    private fun updateSettings(host: McpToolHost, args: JSONObject): JSONObject = runBlocking {
+        val projectId = args.getString("project_id")
+        val project = host.projectOrNull(projectId) ?: return@runBlocking errorResult("Project not found")
+        val current = ProjectSettings.from(project)
+        val environment = if (args.has("environment")) {
+            val values = args.getJSONObject("environment")
+            current.environment.filter { it.isSecret } + values.keys().asSequence().map { key ->
+                require(values.get(key) is String) { "Environment values must be strings" }
+                EnvironmentEdit(key, values.getString(key), false)
+            }.toList()
+        } else current.environment
+        fun intValue(key: String, fallback: Int): Int {
+            if (!args.has(key)) return fallback
+            val value = args.get(key)
+            require(value is Number && value.toDouble() == value.toInt().toDouble()) { "$key must be an integer" }
+            return value.toInt()
+        }
+        if (args.has("start_on_boot")) require(args.get("start_on_boot") is Boolean) { "start_on_boot must be a boolean" }
+        val policy = if (args.has("restart_policy")) {
+            RestartPolicy.entries.find { it.name == args.getString("restart_policy") }
+                ?: throw IllegalArgumentException("restart_policy must be NEVER, ON_FAILURE or ALWAYS")
+        } else current.restartPolicy
+        host.projectSettings.update(projectId, current.copy(
+            port = intValue("port", current.port), restartPolicy = policy,
+            startOnBoot = if (args.has("start_on_boot")) args.getBoolean("start_on_boot") else current.startOnBoot,
+            maxCpuPercent = intValue("max_cpu_percent", current.maxCpuPercent),
+            maxHeapMb = intValue("max_heap_mb", current.maxHeapMb),
+            idleTimeoutMinutes = intValue("idle_timeout_minutes", current.idleTimeoutMinutes),
+            environment = environment
+        ), allowSecrets = false)
+        host.onProjectChanged(projectId)
+        textResult("Project settings saved")
+    }
 
     private fun listProjects(host: McpToolHost): JSONObject = runBlocking {
         val instances = host.serviceSupervisor.instances.value
@@ -293,6 +348,9 @@ object McpTools {
                 .put("start_on_boot", project.startOnBoot)
                 .put("port", project.network.port)
                 .put("allow_lan", project.network.allowLan)
+                .put("max_cpu_percent", project.maxCpuPercent)
+                .put("max_heap_mb", project.maxHeapMb)
+                .put("idle_timeout_minutes", project.idleTimeoutMinutes)
                 .put("environment", env)
                 .put("state", instance?.state?.name ?: "STOPPED")
                 .put("uptime_seconds", instance?.uptimeSeconds ?: 0)
@@ -411,8 +469,8 @@ object McpTools {
 
     private fun stopService(host: McpToolHost, projectId: String): JSONObject = runBlocking {
         host.projectOrNull(projectId) ?: return@runBlocking errorResult("No project with id $projectId")
-        host.serviceSupervisor.stopProject(projectId)
-        textResult("Stopped service for $projectId")
+        if (host.serviceSupervisor.stopProject(projectId)) textResult("Stopped service for $projectId")
+        else errorResult("The runtime is still stopping; wait for its blocking call to return")
     }
 
     private fun serviceStatus(host: McpToolHost): JSONObject {
@@ -492,12 +550,12 @@ object McpTools {
 
     private fun textResult(text: String): JSONObject =
         JSONObject()
-            .put("content", JSONArray().put(JSONObject().put("type", "text").put("text", text)))
+            .put("content", JSONArray().put(JSONObject().put("type", "text").put("text", SecretRedactor.redact(text))))
             .put("isError", false)
 
     private fun errorResult(message: String): JSONObject =
         JSONObject()
-            .put("content", JSONArray().put(JSONObject().put("type", "text").put("text", message)))
+            .put("content", JSONArray().put(JSONObject().put("type", "text").put("text", SecretRedactor.redact(message))))
             .put("isError", true)
 
     private fun tool(

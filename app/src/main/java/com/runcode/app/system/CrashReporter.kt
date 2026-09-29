@@ -2,6 +2,7 @@ package com.runcode.app.system
 
 import android.content.Context
 import android.os.Build
+import com.runcode.app.security.SecretRedactor
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -64,7 +65,7 @@ object CrashReporter {
 
         val file = file(context)
         file.parentFile?.mkdirs()
-        file.writeText(report)
+        file.writeText(SecretRedactor.redact(report))
     }
 
     private fun file(context: Context): File =

@@ -19,7 +19,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Runs project scripts on the CPython interpreter that Chaquopy embeds in the APK.
  *
  * Each service gets its own JVM thread; Chaquopy attaches it to the interpreter, so several
- * scripts can be in flight at once under the GIL. Output is streamed line by line from the
+ * scripts use the same interpreter. The bridge admits one Python workload at a time because
+ * cwd, environment and imports are process-wide. Output is streamed line by line from the
  * Python side through [OutputSink] instead of being collected at the end, so a long-running
  * bot shows up in the console while it runs.
  */
@@ -71,9 +72,15 @@ class PythonEngine(
         if (!Python.isStarted()) {
             return@withContext PrepareResult.Failure("Embedded Python interpreter is not available on this device")
         }
-        val entry = File(project.projectRoot, "source/${project.entryPoint}")
-        if (!entry.exists()) {
+        val source = File(project.projectRoot, "source").canonicalFile
+        val entry = File(source, project.entryPoint).canonicalFile
+        if (!entry.path.startsWith(source.path + File.separator) || !entry.isFile) {
             return@withContext PrepareResult.Failure("Entrypoint script '${project.entryPoint}' does not exist")
+        }
+        try {
+            secretStore.resolveEnvironment(project.environment)
+        } catch (e: IllegalArgumentException) {
+            return@withContext PrepareResult.Failure(e.message ?: "Configure the project's secrets first")
         }
         PrepareResult.Success
     }
@@ -85,7 +92,11 @@ class PythonEngine(
 
         sink.onEvent(LogLevel.SYSTEM, "Initializing Python ${pythonVersion()} for '${project.name}'...")
 
-        val envPairs = project.environment.map { "${it.key}=${secretStore.resolveValue(it.value)}" }
+        val environment = secretStore.resolveEnvironment(project.environment) + mapOf(
+            "RUNCODE_PORT" to project.network.port.toString(),
+            "RUNCODE_BIND_ADDRESS" to if (project.network.allowLan) "0.0.0.0" else project.network.bindAddress
+        )
+        val envPairs = environment.map { "${it.key}=${it.value}" }
         if (envPairs.isNotEmpty()) {
             sink.onEvent(LogLevel.SYSTEM, "Loaded ${envPairs.size} environment variable(s)")
         }
@@ -169,10 +180,9 @@ class PythonEngine(
                 } catch (e: Exception) {
                     sink.onEvent(LogLevel.WARN, "Could not signal the interpreter: ${e.message}")
                 }
-                // The trace hook raises at the script's next executed line, so give it a
-                // moment before declaring the service gone.
+                // An async exception cannot interrupt a blocked native call. Keep ownership
+                // until the worker actually exits, so restart cannot duplicate the service.
                 worker.join(STOP_GRACE_MS)
-                alive.set(false)
             }
 
             override suspend fun forceKill() = stop()
@@ -192,12 +202,12 @@ class PythonEngine(
 
     override suspend fun requestStop(handle: RuntimeHandle): StopResult {
         handle.stop()
-        return StopResult.Stopped
+        return if (handle.isAlive) StopResult.Failed("Python is still stopping; waiting for a blocking call to return") else StopResult.Stopped
     }
 
     override suspend fun forceStop(handle: RuntimeHandle): StopResult {
         handle.forceKill()
-        return StopResult.Stopped
+        return if (handle.isAlive) StopResult.Failed("Python is still stopping") else StopResult.Stopped
     }
 
     override suspend fun health(handle: RuntimeHandle): RuntimeHealth {

@@ -40,6 +40,11 @@ The APK is large — CPython plus the bundled wheels, for `arm64-v8a` and `x86_6
 Python scripts run as `__main__` with the project directory as the working directory, so
 relative paths like `data/tasks.sqlite` resolve the way they would on a desktop.
 
+Only one Python workload (service or MCP snippet) runs at a time. CPython shares environment,
+working directory and imports across threads; concurrent scripts previously mixed project data
+and secrets. Static web services can still run alongside Python. Projects and MCP clients are
+trusted app-level code, not isolated tenants.
+
 ## Files
 
 **Editor → folder icon** opens the project's file manager. It shows the whole project, not
@@ -58,10 +63,29 @@ just `source/`, so whatever a script writes into `data/` is visible too.
   GitHub "Download ZIP" becomes a Python project with its entry point detected. Imports are
   checked for paths that escape the project and capped in size; imported projects never
   start on boot until you turn that on.
-- Exports never contain secrets: a secret environment variable is exported only as its
+- Secret environment values are excluded from the manifest: a secret variable is exported only as its
   `${SEC_...}` reference, and the vault stays on the device.
 
 Binary files and files over 512 KB do not open in the editor; they can still be saved out.
+
+## Project settings
+
+Open **Projects → settings icon** to edit the port, restart policy, start on boot, CPU/heap/idle
+limits and environment variables. Stop the service before saving. Use **Secret** for passwords
+and bot tokens: values go to the Android Keystore-backed vault, while project metadata keeps
+only a reference. Leave an existing secret blank to keep it, or enter a replacement.
+
+For a new Telegram bot, set the secret `TELEGRAM_BOT_TOKEN`, save, run, and send `/start` to the
+bot. New Python HTTP projects serve `/`, `/status` and `/api` on the configured port. Existing
+project files are not rewritten when the app updates.
+
+CPU limits measure the service thread. The Java heap limit measures the whole app, not a
+single Python service's allocations. Idle limits apply to the static web server. Python can
+remain **STOPPING** while blocked in native code; another instance cannot start until it exits.
+
+Imported secret variables need fresh values on this device, even when reimporting an export.
+User code can write sensitive data to files; mark variables correctly and inspect files before
+sharing an archive. The vault cannot sanitize arbitrary project files.
 
 ## MCP bridge
 
@@ -73,12 +97,17 @@ Authorization: Bearer <token from the System screen>
 Content-Type: application/json
 ```
 
-Sixteen tools: `list_projects`, `get_project`, `list_files`, `read_file`, `write_file`,
+Seventeen tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
 `create_directory`, `rename_path`, `delete_path`, `set_entry_point`, `start_service`,
 `stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`.
 
 File changes made over the bridge show up in the app straight away: the file tree refreshes,
 and a file open in the editor reloads unless it has unsaved edits.
+
+`update_project_settings` accepts optional `port`, `restart_policy`, `start_on_boot`,
+`max_cpu_percent`, `max_heap_mb`, `idle_timeout_minutes`, and an `environment` object of plain
+string values. Providing `environment` replaces plain variables and preserves existing secrets.
+Secret variables can only be edited in the app's settings form.
 
 ### Connecting from a computer
 
@@ -106,6 +135,8 @@ The bridge exposes a shell, arbitrary Python and read/write file access on the d
   anyone on the same Wi-Fi with the token able to run commands on the device. Prefer
   `adb forward` or a tunnel.
 - Secret-valued environment variables are returned as `<secret>`, never echoed back.
+- Registered vault values are redacted from logs and text tool results. This is not an
+  isolation boundary: MCP's arbitrary code tools and project scripts run with app privileges.
 - `GET /health` is the only unauthenticated route and reports nothing about the device.
 - The bridge lives in the app process. It holds a foreground service while online, but it
   does not survive the process being killed — restart it from the System screen.
@@ -125,6 +156,17 @@ app/src/main/java/com/runcode/app/
 app/src/main/python/
   runcode_runner.py   stdout/stderr bridge, cooperative stop, snippet runner
 ```
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
+The JVM tests cover settings validation, vault rollback, secret handling, archive paths,
+editor ownership and supervisor restarts. Robolectric tests use API 28; device testing is
+still needed for Keystore, Compose interaction and foreground-service behavior on API 36.
 
 ## License
 

@@ -5,6 +5,7 @@ import com.runcode.app.database.ProjectDatabaseManager
 import com.runcode.app.domain.models.Project
 import com.runcode.app.logging.LogManager
 import com.runcode.app.storage.ProjectStorage
+import com.runcode.app.settings.ProjectSettingsManager
 import com.runcode.app.supervisor.ServiceSupervisor
 import com.runcode.app.terminal.TerminalSession
 import java.io.File
@@ -21,6 +22,7 @@ class McpToolHost(
     val logManager: LogManager,
     val terminalSession: TerminalSession,
     val runPython: (code: String, workingDir: File) -> String,
+    val projectSettings: ProjectSettingsManager,
     /** Tells the UI a project's files or settings changed underneath it. */
     val onProjectChanged: (projectId: String) -> Unit
 ) {

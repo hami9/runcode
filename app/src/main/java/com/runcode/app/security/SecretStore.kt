@@ -18,25 +18,26 @@ import javax.crypto.spec.GCMParameterSpec
  * re-derived from anything shipped in the APK. Each value gets a fresh random IV, and a value
  * that cannot be encrypted is refused rather than written out in the clear.
  */
-class SecretStore(context: Context) {
+class SecretStore(context: Context) : SecretVault {
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private val secretKey: SecretKey? by lazy { loadOrCreateKey() }
 
     /** Returns true when the value was stored encrypted. Nothing is written otherwise. */
-    fun setSecret(key: String, plainText: String): Boolean {
+    override fun setSecret(key: String, plainText: String): Boolean {
         val encoded = encrypt(plainText) ?: return false
-        prefs.edit().putString(key, encoded).apply()
+        if (!prefs.edit().putString(key, encoded).commit()) return false
+        SecretRedactor.register(plainText)
         return true
     }
 
-    fun getSecret(key: String): String? {
+    override fun getSecret(key: String): String? {
         val stored = prefs.getString(key, null) ?: return null
-        return decrypt(stored)
+        return decrypt(stored)?.also { SecretRedactor.register(it) }
     }
 
-    fun removeSecret(key: String) {
+    override fun removeSecret(key: String) {
         prefs.edit().remove(key).apply()
     }
 
@@ -55,6 +56,17 @@ class SecretStore(context: Context) {
         }
         return raw
     }
+
+    fun resolveEnvironment(environment: List<com.runcode.app.domain.models.EnvironmentVariable>): Map<String, String> =
+        environment.associate { variable ->
+            val value = if (variable.isSecret) {
+                val key = SecretReferences.key(variable.value)
+                val secret = key?.let { getSecret(it) }
+                require(!secret.isNullOrEmpty()) { "Set the secret '${variable.key}' in Project settings before running" }
+                secret
+            } else variable.value
+            variable.key to value
+        }
 
     private fun encrypt(plainText: String): String? {
         val key = secretKey ?: return null

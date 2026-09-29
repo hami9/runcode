@@ -16,6 +16,7 @@ import com.runcode.app.domain.models.RuntimeInstance
 import com.runcode.app.domain.models.TableInfo
 import com.runcode.app.mcp.McpServerState
 import com.runcode.app.runtime.PythonEngine
+import com.runcode.app.settings.ProjectSettings
 import com.runcode.app.storage.EntryPointEffect
 import com.runcode.app.storage.EntryPoints
 import com.runcode.app.storage.FileKind
@@ -28,11 +29,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application as RuncodeApp
+    private val editorMutex = Mutex()
 
     // Projects
     private val _projects = MutableStateFlow<List<Project>>(emptyList())
@@ -140,8 +144,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startTerminal() {
         val project = _selectedProject.value
         val dir = project?.let { File(it.projectRoot) } ?: app.filesDir
-        val env = project?.environment?.associate { it.key to app.secretStore.resolveValue(it.value) } ?: emptyMap()
-        app.terminalSession.start(dir, env)
+        try {
+            val env = project?.let { app.secretStore.resolveEnvironment(it.environment) } ?: emptyMap()
+            app.terminalSession.start(dir, env)
+        } catch (e: IllegalArgumentException) {
+            _userMessage.value = e.message
+        }
     }
 
     fun sendTerminalCommand(command: String) = app.terminalSession.send(command)
@@ -205,14 +213,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectProject(project: Project) {
-        _selectedProject.value = project
-        refreshProjectFiles(project.id)
-        refreshDatabases(project)
-        refreshBackups(project.id)
+        viewModelScope.launch {
+            editorMutex.withLock {
+                if (_selectedProject.value?.id == project.id) return@withLock
+                if (_isDirty.value && !persistCurrentFile(announce = false)) return@withLock
+                clearEditor()
+                _selectedProject.value = project
+                refreshProjectFiles(project.id)
+                refreshDatabases(project)
+                refreshBackups(project.id)
+                openFileLocked(project.id, "source/${project.entryPoint}")
+            }
+        }
+    }
 
-        // Set default open file to entrypoint
-        val entry = "source/${project.entryPoint}"
-        openFile(project.id, entry)
+    private fun clearEditor() {
+        _openTabs.value = emptyList()
+        _activeTab.value = null
+        _editorContent.value = ""
+        _isDirty.value = false
+        undoStack.clear()
+        redoStack.clear()
     }
 
     fun refreshProjectFiles(projectId: String) {
@@ -224,53 +245,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openFile(projectId: String, relativePath: String) {
         viewModelScope.launch {
-            try {
-                val info = withContext(Dispatchers.IO) {
-                    app.projectStorage.inspect(projectId, relativePath, EDITOR_MAX_BYTES)
-                }
-                val name = File(relativePath).name
-                when (info.kind) {
-                    FileKind.DIRECTORY -> return@launch
-                    FileKind.BINARY -> {
-                        _userMessage.value = "$name is a binary file (${ProjectStorage.formatSize(info.size)}) and can't be " +
-                            "edited as text. Use ⋮ → Save a copy to get it out."
-                        return@launch
-                    }
-                    FileKind.TOO_LARGE -> {
-                        _userMessage.value = "$name is ${ProjectStorage.formatSize(info.size)}, too large for the editor " +
-                            "(limit ${ProjectStorage.formatSize(EDITOR_MAX_BYTES)}). Use ⋮ → Save a copy instead."
-                        return@launch
-                    }
-                    FileKind.TEXT, FileKind.MISSING -> Unit
-                }
+            editorMutex.withLock { openFileLocked(projectId, relativePath) }
+        }
+    }
 
-                // Switching tabs used to drop unsaved edits silently. Save them instead.
-                if (_isDirty.value && _activeTab.value != relativePath) {
-                    persistCurrentFile(announce = false)
-                }
-
-                val content = withContext(Dispatchers.IO) { app.projectStorage.readFile(projectId, relativePath) }
-                val currentTabs = _openTabs.value.toMutableList()
-                if (!currentTabs.contains(relativePath)) {
-                    currentTabs.add(relativePath)
-                    _openTabs.value = currentTabs
-                }
-                _activeTab.value = relativePath
-                _editorContent.value = content
-                _isDirty.value = false
-                undoStack.clear()
-                redoStack.clear()
-            } catch (e: Exception) {
-                _userMessage.value = "Failed to open file: ${e.message}"
+    private suspend fun openFileLocked(projectId: String, relativePath: String) {
+        if (_selectedProject.value?.id != projectId) return
+        if (_activeTab.value == relativePath && _isDirty.value) return
+        try {
+            val info = withContext(Dispatchers.IO) {
+                app.projectStorage.inspect(projectId, relativePath, EDITOR_MAX_BYTES)
             }
+            val name = File(relativePath).name
+            when (info.kind) {
+                FileKind.DIRECTORY -> return
+                FileKind.BINARY -> {
+                    _userMessage.value = "$name is a binary file (${ProjectStorage.formatSize(info.size)}) and can't be " +
+                        "edited as text. Use ⋮ → Save a copy to get it out."
+                    return
+                }
+                FileKind.TOO_LARGE -> {
+                    _userMessage.value = "$name is ${ProjectStorage.formatSize(info.size)}, too large for the editor " +
+                        "(limit ${ProjectStorage.formatSize(EDITOR_MAX_BYTES)}). Use ⋮ → Save a copy instead."
+                    return
+                }
+                FileKind.TEXT, FileKind.MISSING -> Unit
+            }
+
+            val content = withContext(Dispatchers.IO) { app.projectStorage.readFile(projectId, relativePath) }
+            if (_selectedProject.value?.id != projectId) return
+            if (_isDirty.value) {
+                if (_activeTab.value == relativePath || !persistCurrentFile(announce = false)) return
+            }
+            val currentTabs = _openTabs.value.toMutableList()
+            if (!currentTabs.contains(relativePath)) {
+                currentTabs.add(relativePath)
+                _openTabs.value = currentTabs
+            }
+            _activeTab.value = relativePath
+            _editorContent.value = content
+            _isDirty.value = false
+            undoStack.clear()
+            redoStack.clear()
+        } catch (e: Exception) {
+            _userMessage.value = "Failed to open file: ${e.message}"
         }
     }
 
     fun closeTab(tab: String) {
         viewModelScope.launch {
             // Closing the tab you are typing in should not throw the typing away.
-            if (_isDirty.value && _activeTab.value == tab) persistCurrentFile(announce = false)
-            removeTab(tab)
+            editorMutex.withLock {
+                if (_isDirty.value && _activeTab.value == tab && !persistCurrentFile(announce = false)) return@withLock
+                removeTab(tab)
+            }
         }
     }
 
@@ -329,16 +357,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Writes the editor buffer to disk and only returns once it is there, so callers that are
      * about to execute the file cannot race ahead of the save.
      */
-    private suspend fun persistCurrentFile(announce: Boolean) {
-        val project = _selectedProject.value ?: return
-        val tab = _activeTab.value ?: return
-        try {
+    private suspend fun persistCurrentFile(announce: Boolean): Boolean {
+        val project = _selectedProject.value ?: return !_isDirty.value
+        val tab = _activeTab.value ?: return !_isDirty.value
+        return try {
             app.projectStorage.writeFileAtomically(project.id, tab, _editorContent.value)
             _isDirty.value = false
             if (announce) _userMessage.value = "Saved ${File(tab).name}"
             refreshProjectFiles(project.id)
+            true
         } catch (e: Exception) {
             _userMessage.value = "Save error: ${e.message}"
+            false
         }
     }
 
@@ -590,6 +620,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_selectedProject.value?.id == project.id) _selectedProject.value = project
     }
 
+    suspend fun updateProjectSettings(projectId: String, settings: ProjectSettings): String? = try {
+        val updated = withContext(Dispatchers.IO) { app.projectSettings.update(projectId, settings) }
+        _projects.value = _projects.value.map { if (it.id == projectId) updated else it }
+        if (_selectedProject.value?.id == projectId) _selectedProject.value = updated
+        _userMessage.value = "Project settings saved"
+        null
+    } catch (e: Exception) {
+        com.runcode.app.security.SecretRedactor.redact(e.message ?: "Could not save settings")
+    }
+
     /** Something outside the UI (the MCP bridge) changed a project's files or settings. */
     private suspend fun onExternalProjectChange(projectId: String) {
         val list = app.appMetaDatabase.getAllProjects()
@@ -607,7 +647,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val info = app.projectStorage.inspect(projectId, tab, EDITOR_MAX_BYTES)
             if (info.kind == FileKind.TEXT) app.projectStorage.readFile(projectId, tab) else null
         } ?: return
-        if (onDisk != _editorContent.value && !_isDirty.value && _activeTab.value == tab) {
+        if (onDisk != _editorContent.value && !_isDirty.value && _activeTab.value == tab &&
+            _selectedProject.value?.id == projectId) {
             _editorContent.value = onDisk
             undoStack.clear()
             redoStack.clear()
@@ -652,9 +693,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteProject(project: Project) {
         viewModelScope.launch {
-            app.serviceSupervisor.stopProject(project.id)
+            if (!app.serviceSupervisor.stopProject(project.id)) {
+                _userMessage.value = "The service is still stopping. Try deleting it after it exits."
+                return@launch
+            }
             app.projectStorage.deleteProject(project.id)
             app.appMetaDatabase.deleteProject(project.id)
+            val secretPrefix = "PROJECT_${project.id.replace('-', '_')}_"
+            app.secretStore.getAllSecretKeys().filter { it.startsWith(secretPrefix) }.forEach { app.secretStore.removeSecret(it) }
+            if (_selectedProject.value?.id == project.id) {
+                clearEditor()
+                _selectedProject.value = null
+            }
             loadProjects()
             _userMessage.value = "Project '${project.name}' deleted."
         }
@@ -664,7 +714,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun runProject(project: Project) {
         viewModelScope.launch {
             if (_isDirty.value) {
-                persistCurrentFile(announce = false)
+                if (!persistCurrentFile(announce = false)) return@launch
             }
             val started = app.serviceSupervisor.startProject(project)
             if (!started) {

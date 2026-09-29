@@ -5,6 +5,12 @@ import java.util.regex.Pattern
 
 object SecretRedactor {
 
+    private val knownSecrets = java.util.concurrent.CopyOnWriteArraySet<String>()
+
+    fun register(value: String) {
+        if (value.isNotEmpty()) knownSecrets.add(value)
+    }
+
     // Common sensitive patterns: Telegram bot tokens (e.g. 123456789:ABCdef-GHIjkl...), API keys, JWT, passwords
     private val TELEGRAM_BOT_TOKEN = Pattern.compile("\\b(\\d{8,10}:[A-Za-z0-9_-]{35})\\b")
     private val GENERIC_API_KEY = Pattern.compile("(?i)\\b(api[_-]?key|secret|token|password|auth)['\"]?\\s*[:=]\\s*['\"]?([A-Za-z0-9_\\-.~!@#\$%^&*+=]{8,})['\"]?")
@@ -14,6 +20,10 @@ object SecretRedactor {
     fun redact(input: String): String {
         if (input.isEmpty()) return input
         var sanitized = input
+        // Pattern matching alone misses arbitrary user passwords printed without a label.
+        knownSecrets.sortedByDescending { it.length }.forEach {
+            sanitized = sanitized.replace(it, "[REDACTED]")
+        }
 
         // Mask Telegram Bot tokens: keep first 4 digits, mask rest
         sanitized = replaceAll(TELEGRAM_BOT_TOKEN, sanitized) { matcher ->

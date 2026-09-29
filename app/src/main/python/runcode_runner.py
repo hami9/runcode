@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - only on a build without ctypes
     _set_async_exc = None
 
 _lock = threading.Lock()
+_execution_lock = threading.Lock()
 _threads = {}       # service_id -> thread ident
 _stop_flags = {}    # service_id -> True, only consulted by the fallback tracer
 
@@ -123,6 +124,8 @@ def request_stop(service_id):
     exception when that call returns, not instantly.
     """
     with _lock:
+        if _stop_flags.get(service_id, False):
+            return "pending"
         ident = _threads.get(service_id)
         _stop_flags[service_id] = True
 
@@ -154,6 +157,17 @@ def _fallback_tracer(service_id):
 
 
 def run_script(service_id, script_path, working_dir, env_pairs, sink):
+    # CPython's cwd, environment and import state are shared by all JVM threads. A
+    # second script must not receive the first project's secrets or relative writes.
+    if not _execution_lock.acquire(blocking=False):
+        return "fatal:Another Python task is active. Stop it before starting this project."
+    try:
+        return _run_script_locked(service_id, script_path, working_dir, env_pairs, sink)
+    finally:
+        _execution_lock.release()
+
+
+def _run_script_locked(service_id, script_path, working_dir, env_pairs, sink):
     """
     Execute `script_path` as __main__.
 
@@ -161,12 +175,10 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
     does not have to interpret Python exceptions itself.
     """
     ident = threading.get_ident()
-    with _lock:
-        _threads[service_id] = ident
-        _stop_flags.pop(service_id, None)
-
     previous_cwd = os.getcwd()
     previous_argv = list(sys.argv)
+    previous_path = list(sys.path)
+    previous_environment = {}
 
     # Per-thread routing, so concurrent services never steal each other's output.
     _stdout_dispatcher.register(ident, sink)
@@ -175,9 +187,16 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
     using_fallback = _set_async_exc is None
 
     try:
+        with _lock:
+            _threads[service_id] = ident
+            stop_requested = _stop_flags.get(service_id, False)
+        if stop_requested:
+            raise ScriptInterrupt()
         for pair in env_pairs:
             key, _, value = pair.partition("=")
             if key:
+                if key not in previous_environment:
+                    previous_environment[key] = os.environ.get(key)
                 os.environ[key] = value
 
         if working_dir and os.path.isdir(working_dir):
@@ -225,7 +244,13 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
     finally:
         _stdout_dispatcher.unregister(ident)
         _stderr_dispatcher.unregister(ident)
+        for key, value in previous_environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         sys.argv = previous_argv
+        sys.path[:] = previous_path
         try:
             os.chdir(previous_cwd)
         except Exception:
@@ -236,6 +261,15 @@ def run_script(service_id, script_path, working_dir, env_pairs, sink):
 
 
 def run_snippet(code, working_dir):
+    if not _execution_lock.acquire(blocking=False):
+        return "Another Python task is active. Stop it before running a snippet."
+    try:
+        return _run_snippet_locked(code, working_dir)
+    finally:
+        _execution_lock.release()
+
+
+def _run_snippet_locked(code, working_dir):
     """
     Execute a one-off snippet and return everything it printed.
 

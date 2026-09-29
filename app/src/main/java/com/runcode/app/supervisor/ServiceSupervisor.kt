@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,9 +35,9 @@ class ServiceSupervisor(
     private val context: Context,
     private val runtimeRegistry: RuntimeRegistry,
     private val logManager: LogManager,
-    private val portManager: PortManager
+    private val portManager: PortManager,
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default)
 ) {
-    private val scope = CoroutineScope(Dispatchers.Default)
     private val mutex = Mutex()
 
     private val activeHandles = ConcurrentHashMap<String, RuntimeHandle>() // projectId -> handle
@@ -56,6 +57,18 @@ class ServiceSupervisor(
     }
 
     suspend fun startProject(project: Project): Boolean = mutex.withLock {
+        // The lifecycle watcher still owns an exited worker until it records the outcome.
+        // Cancelling it here would leave RUNNING state with no worker and no watcher.
+        if (activeHandles.containsKey(project.id)) return false
+        supervisorJobs.remove(project.id)?.cancel()
+        startProjectLocked(project, 0)
+    }
+
+    fun hasActiveWork(projectId: String): Boolean =
+        activeHandles[projectId]?.isAlive == true || supervisorJobs[projectId]?.isActive == true ||
+            _instances.value[projectId]?.state in setOf(ServiceState.PREPARING, ServiceState.STARTING, ServiceState.RESTARTING, ServiceState.STOPPING)
+
+    private suspend fun startProjectLocked(project: Project, restartCount: Int): Boolean {
         val current = _instances.value[project.id]
         if (current?.isRunning == true) {
             logManager.log(project.id, project.name, LogLevel.WARN, "Service is already running.")
@@ -89,7 +102,8 @@ class ServiceSupervisor(
                 profile = project.profile,
                 state = ServiceState.PREPARING,
                 port = effectiveProject.network.port,
-                boundAddress = effectiveProject.network.bindAddress
+                boundAddress = effectiveProject.network.bindAddress,
+                restartCount = restartCount
             )
         }
 
@@ -131,7 +145,7 @@ class ServiceSupervisor(
 
             // Watch this service. The original project is passed on purpose so that a restart
             // re-runs port resolution from scratch.
-            supervisorJobs[project.id] = scope.launch { superviseLifecycle(project, handle) }
+            supervisorJobs[project.id] = scope.launch { superviseLifecycle(project, handle, restartCount) }
 
             return true
         } catch (e: Throwable) {
@@ -148,6 +162,8 @@ class ServiceSupervisor(
     }
 
     suspend fun stopProject(projectId: String): Boolean = mutex.withLock {
+        // A restart backoff has no handle but still has a live job to cancel.
+        supervisorJobs.remove(projectId)?.cancel()
         val handle = activeHandles[projectId] ?: run {
             updateInstance(projectId) { it.copy(state = ServiceState.STOPPED) }
             syncSystemState()
@@ -159,8 +175,6 @@ class ServiceSupervisor(
 
         updateInstance(projectId) { it.copy(state = ServiceState.STOPPING) }
 
-        supervisorJobs.remove(projectId)?.cancel()
-
         val profile = activeProfiles[projectId] ?: _instances.value[projectId]?.profile
         if (profile != null) {
             runtimeRegistry.getEngineForProfile(profile).requestStop(handle)
@@ -168,6 +182,22 @@ class ServiceSupervisor(
             // We no longer know which engine owns this handle; shutting it down directly still
             // beats leaking the runtime.
             handle.stop()
+        }
+
+        if (handle.isAlive) {
+            updateInstance(projectId) { it.copy(state = ServiceState.STOPPING, lastError = "Waiting for the runtime to exit") }
+            supervisorJobs[projectId] = scope.launch {
+                while (handle.isAlive) delay(250)
+                mutex.withLock {
+                    if (activeHandles[projectId] === handle) {
+                        releaseService(projectId)
+                        updateInstance(projectId) { it.copy(state = ServiceState.STOPPED, lastError = null) }
+                        syncSystemState()
+                    }
+                }
+            }
+            syncSystemState()
+            return false
         }
 
         activeHandles.remove(projectId)
@@ -182,13 +212,13 @@ class ServiceSupervisor(
     }
 
     suspend fun restartProject(project: Project): Boolean {
-        stopProject(project.id)
-        delay(300)
+        if (!stopProject(project.id)) return false
         return startProject(project)
     }
 
-    private suspend fun superviseLifecycle(project: Project, handle: RuntimeHandle) {
-        var consecutiveCrashes = 0
+    private suspend fun superviseLifecycle(project: Project, handle: RuntimeHandle, restartCount: Int) {
+        var consecutiveCrashes = restartCount
+        val thisJob = currentCoroutineContext()[Job]
         var consecutiveOverLimit = 0
 
         while (true) {
@@ -248,6 +278,13 @@ class ServiceSupervisor(
                     releaseService(project.id)
                     updateInstance(project.id) { it.copy(state = ServiceState.STOPPED, lastError = null) }
                     syncSystemState()
+                    if (project.restartPolicy == RestartPolicy.ALWAYS) {
+                        updateInstance(project.id) { it.copy(state = ServiceState.RESTARTING) }
+                        delay(1500)
+                        mutex.withLock {
+                            if (supervisorJobs[project.id] === thisJob) startProjectLocked(project, 0)
+                        }
+                    }
                     break
                 }
 
@@ -292,7 +329,9 @@ class ServiceSupervisor(
                         syncSystemState()
 
                         delay(backoffMs)
-                        startProject(project)
+                        mutex.withLock {
+                            if (supervisorJobs[project.id] === thisJob) startProjectLocked(project, consecutiveCrashes)
+                        }
                     } else {
                         if (consecutiveCrashes > MAX_RESTARTS) {
                             logManager.log(
@@ -371,7 +410,9 @@ class ServiceSupervisor(
 
     /** Brings the wake lock and the foreground notification back in line with live work. */
     private fun syncSystemState() {
-        val runningCount = _instances.value.values.count { it.isRunning }
+        val runningCount = _instances.value.values.count {
+            it.isRunning || it.state == ServiceState.STOPPING || it.state == ServiceState.RESTARTING
+        }
         val bridgeHeld = externalHold.get()
         syncWakeLock(runningCount > 0 || bridgeHeld)
         syncForegroundService(runningCount, bridgeHeld)
@@ -413,7 +454,7 @@ class ServiceSupervisor(
     }
 
     suspend fun stopAll() {
-        activeHandles.keys().toList().forEach { projectId ->
+        (activeHandles.keys + supervisorJobs.keys).toSet().forEach { projectId ->
             stopProject(projectId)
         }
     }

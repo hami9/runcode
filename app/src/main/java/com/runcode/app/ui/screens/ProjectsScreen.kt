@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.Stop
@@ -85,6 +86,7 @@ fun ProjectsScreen(
     var searchQuery by remember { mutableStateOf("") }
     var showCreateDialog by remember { mutableStateOf(false) }
     var projectToDelete by remember { mutableStateOf<Project?>(null) }
+    var projectToConfigure by remember { mutableStateOf<Project?>(null) }
 
     // Any .zip: a runcode export comes back with its settings, anything else becomes a Python project.
     val importProject = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -166,6 +168,12 @@ fun ProjectsScreen(
             items(filteredProjects) { project ->
                 val inst = instances[project.id]
                 val isRunning = inst?.isRunning == true
+                val isBusy = inst?.state in setOf(
+                    com.runcode.app.domain.models.ServiceState.PREPARING,
+                    com.runcode.app.domain.models.ServiceState.STARTING,
+                    com.runcode.app.domain.models.ServiceState.RESTARTING,
+                    com.runcode.app.domain.models.ServiceState.STOPPING
+                )
 
                 Card(
                     modifier = Modifier
@@ -215,13 +223,14 @@ fun ProjectsScreen(
                             } else {
                                 Button(
                                     onClick = { viewModel.runProject(project) },
+                                    enabled = !isBusy,
                                     colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.testTag("project_run_${project.id}")
                                 ) {
                                     Icon(Icons.Default.PlayArrow, contentDescription = "Run", tint = Color.Black, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Run", color = Color.Black, fontWeight = FontWeight.Bold)
+                                    Text(if (isBusy) "Waiting" else "Run", color = Color.Black, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -245,6 +254,9 @@ fun ProjectsScreen(
                             )
 
                             Row {
+                                IconButton(onClick = { projectToConfigure = project }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Settings, contentDescription = "Project settings", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                                }
                                 IconButton(
                                     onClick = {
                                         viewModel.selectProject(project)
@@ -272,6 +284,10 @@ fun ProjectsScreen(
                 }
             }
         }
+    }
+
+    projectToConfigure?.let { project ->
+        ProjectSettingsDialog(project, viewModel) { projectToConfigure = null }
     }
 
     // New Project Dialog
