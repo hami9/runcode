@@ -252,44 +252,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun openFileLocked(projectId: String, relativePath: String) {
         if (_selectedProject.value?.id != projectId) return
         if (_activeTab.value == relativePath && _isDirty.value) return
-            try {
-                val info = withContext(Dispatchers.IO) {
-                    app.projectStorage.inspect(projectId, relativePath, EDITOR_MAX_BYTES)
-                }
-                val name = File(relativePath).name
-                when (info.kind) {
-                    FileKind.DIRECTORY -> return
-                    FileKind.BINARY -> {
-                        _userMessage.value = "$name is a binary file (${ProjectStorage.formatSize(info.size)}) and can't be " +
-                            "edited as text. Use ⋮ → Save a copy to get it out."
-                        return
-                    }
-                    FileKind.TOO_LARGE -> {
-                        _userMessage.value = "$name is ${ProjectStorage.formatSize(info.size)}, too large for the editor " +
-                            "(limit ${ProjectStorage.formatSize(EDITOR_MAX_BYTES)}). Use ⋮ → Save a copy instead."
-                        return
-                    }
-                    FileKind.TEXT, FileKind.MISSING -> Unit
-                }
-
-                val content = withContext(Dispatchers.IO) { app.projectStorage.readFile(projectId, relativePath) }
-                if (_selectedProject.value?.id != projectId) return
-                if (_isDirty.value) {
-                    if (_activeTab.value == relativePath || !persistCurrentFile(announce = false)) return
-                }
-                val currentTabs = _openTabs.value.toMutableList()
-                if (!currentTabs.contains(relativePath)) {
-                    currentTabs.add(relativePath)
-                    _openTabs.value = currentTabs
-                }
-                _activeTab.value = relativePath
-                _editorContent.value = content
-                _isDirty.value = false
-                undoStack.clear()
-                redoStack.clear()
-            } catch (e: Exception) {
-                _userMessage.value = "Failed to open file: ${e.message}"
+        try {
+            val info = withContext(Dispatchers.IO) {
+                app.projectStorage.inspect(projectId, relativePath, EDITOR_MAX_BYTES)
             }
+            val name = File(relativePath).name
+            when (info.kind) {
+                FileKind.DIRECTORY -> return
+                FileKind.BINARY -> {
+                    _userMessage.value = "$name is a binary file (${ProjectStorage.formatSize(info.size)}) and can't be " +
+                        "edited as text. Use ⋮ → Save a copy to get it out."
+                    return
+                }
+                FileKind.TOO_LARGE -> {
+                    _userMessage.value = "$name is ${ProjectStorage.formatSize(info.size)}, too large for the editor " +
+                        "(limit ${ProjectStorage.formatSize(EDITOR_MAX_BYTES)}). Use ⋮ → Save a copy instead."
+                    return
+                }
+                FileKind.TEXT, FileKind.MISSING -> Unit
+            }
+
+            val content = withContext(Dispatchers.IO) { app.projectStorage.readFile(projectId, relativePath) }
+            if (_selectedProject.value?.id != projectId) return
+            if (_isDirty.value) {
+                if (_activeTab.value == relativePath || !persistCurrentFile(announce = false)) return
+            }
+            val currentTabs = _openTabs.value.toMutableList()
+            if (!currentTabs.contains(relativePath)) {
+                currentTabs.add(relativePath)
+                _openTabs.value = currentTabs
+            }
+            _activeTab.value = relativePath
+            _editorContent.value = content
+            _isDirty.value = false
+            undoStack.clear()
+            redoStack.clear()
+        } catch (e: Exception) {
+            _userMessage.value = "Failed to open file: ${e.message}"
+        }
     }
 
     fun closeTab(tab: String) {
