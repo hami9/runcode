@@ -125,6 +125,27 @@ curl -s -X POST http://127.0.0.1:8765/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
+### Connecting from anywhere
+
+Turn on **Public URL (internet)** under the bridge. The app opens an outbound SSH reverse
+tunnel and shows an `https://…/mcp` endpoint with a **Copy** button. No port forwarding,
+public IP or extra app is needed, and it works behind carrier NAT and with a VPN on: the
+connection starts on the phone, so Android sends it through the VPN like any other traffic.
+
+- The relay is [Pinggy](https://pinggy.io) over SSH on port 443, with
+  [localhost.run](https://localhost.run) on port 22 as a fallback.
+- A dropped tunnel reconnects with backoff (2 s up to 30 s). Switching between Wi-Fi and
+  mobile data, or a VPN reconnecting, reconnects it straight away.
+- Free relays hand out a new URL on every connection and Pinggy's free tunnels last 60
+  minutes, so copy the endpoint again after a reconnect.
+- If it keeps retrying with a VPN on, check that runcode is not excluded from the VPN
+  (split tunneling).
+
+```bash
+claude mcp add --transport http runcode https://<id>.run.pinggy-free.link/mcp \
+  --header "Authorization: Bearer $RUNCODE_TOKEN"
+```
+
 ### Security
 
 The bridge exposes a shell, arbitrary Python and read/write file access on the device.
@@ -134,6 +155,9 @@ The bridge exposes a shell, arbitrary Python and read/write file access on the d
 - The listener binds `127.0.0.1` unless you turn on **Expose on local network**, which makes
   anyone on the same Wi-Fi with the token able to run commands on the device. Prefer
   `adb forward` or a tunnel.
+- **Public URL** makes the bridge reachable from the whole internet for anyone with both the
+  URL and the token. The relay terminates HTTPS, so it can read requests, including the
+  token. Turn it off when you are done and rotate the token after sharing it.
 - Secret-valued environment variables are returned as `<secret>`, never echoed back.
 - Registered vault values are redacted from logs and text tool results. This is not an
   isolation boundary: MCP's arbitrary code tools and project scripts run with app privileges.
@@ -148,7 +172,7 @@ app/src/main/java/com/runcode/app/
   runtime/     PythonEngine (Chaquopy), StaticWebEngine, engine contracts
   supervisor/  ServiceSupervisor — lifecycle, restart policy, ports, wake lock
   terminal/    TerminalSession — interactive sh plus one-shot command runner
-  mcp/         McpServer (JSON-RPC over HTTP), McpTools, McpToolHost
+  mcp/         McpServer (JSON-RPC over HTTP), McpTools, McpToolHost, McpTunnel (public URL)
   storage/     Path-checked project files, zip import/export, entry-point tracking
   database/    App metadata DB and the project SQLite browser
   security/    Keystore-backed secret vault, log redaction

@@ -15,6 +15,8 @@ import com.runcode.app.domain.models.RuntimeEvent
 import com.runcode.app.domain.models.RuntimeInstance
 import com.runcode.app.domain.models.TableInfo
 import com.runcode.app.mcp.McpServerState
+import com.runcode.app.mcp.McpTunnelState
+import com.runcode.app.mcp.TunnelStatus
 import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.settings.ProjectSettings
 import com.runcode.app.storage.EntryPointEffect
@@ -109,6 +111,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _mcpAllowLan = MutableStateFlow(false)
     val mcpAllowLan: StateFlow<Boolean> = _mcpAllowLan.asStateFlow()
 
+    val mcpTunnelState: StateFlow<McpTunnelState> = app.mcpTunnel.state
+
+    // The tunnel outlives this view model, so read the switch back from it.
+    private val _mcpPublic = MutableStateFlow(app.mcpTunnel.state.value.status != TunnelStatus.OFF)
+    val mcpPublic: StateFlow<Boolean> = _mcpPublic.asStateFlow()
+
     /** Process-wide resource snapshot, refreshed alongside device capabilities. */
     private val _processStats = MutableStateFlow(ProcessStats())
     val processStats: StateFlow<ProcessStats> = _processStats.asStateFlow()
@@ -167,6 +175,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             app.mcpServer.stop()
             app.mcpServer.start(MCP_PORT, _mcpToken.value, allow)
             app.serviceSupervisor.setExternalHold(app.mcpServer.state.value.isRunning)
+            syncMcpTunnel()
         }
     }
 
@@ -180,9 +189,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _userMessage.value = state.lastError?.let { "MCP bridge failed: $it" }
                 ?: "MCP bridge listening on ${state.boundAddress}:${state.port}"
         }
+        syncMcpTunnel()
         // Hold the process in the foreground while the bridge is up, otherwise Android
         // reclaims it as soon as the user leaves the app and the client loses its server.
         app.serviceSupervisor.setExternalHold(app.mcpServer.state.value.isRunning)
+    }
+
+    fun setMcpPublic(enabled: Boolean) {
+        _mcpPublic.value = enabled
+        syncMcpTunnel()
+    }
+
+    /** The tunnel forwards to the bridge, so it runs only while both are switched on. */
+    private fun syncMcpTunnel() {
+        if (_mcpPublic.value && app.mcpServer.state.value.isRunning) {
+            app.mcpTunnel.start(MCP_PORT)
+        } else {
+            app.mcpTunnel.stop()
+        }
     }
 
     fun regenerateMcpToken() {
@@ -190,6 +214,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (app.mcpServer.state.value.isRunning) {
             app.mcpServer.stop()
             app.mcpServer.start(MCP_PORT, _mcpToken.value, _mcpAllowLan.value)
+            syncMcpTunnel()
         }
         _userMessage.value = "New MCP token generated. Existing clients must be updated."
     }

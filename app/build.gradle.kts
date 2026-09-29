@@ -135,7 +135,10 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // SSH client for the MCP bridge's public tunnel. Pure Java, no native code.
+    implementation("com.github.mwiede:jsch:2.28.7")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.apache.sshd:sshd-core:2.20.0")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }

@@ -1,6 +1,8 @@
 package com.runcode.app
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
 import com.chaquo.python.Python
 import com.runcode.app.backup.BackupManager
 import com.runcode.app.database.AppMetaDatabase
@@ -10,6 +12,8 @@ import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.logging.LogManager
 import com.runcode.app.mcp.McpServer
 import com.runcode.app.mcp.McpToolHost
+import com.runcode.app.mcp.McpTunnel
+import com.runcode.app.mcp.SshTunnelConnector
 import com.runcode.app.network.PortManager
 import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.runtime.RuntimeRegistry
@@ -56,6 +60,8 @@ class RuncodeApp : Application() {
     lateinit var terminalSession: TerminalSession
         private set
     lateinit var mcpServer: McpServer
+        private set
+    lateinit var mcpTunnel: McpTunnel
         private set
     lateinit var processMonitor: ProcessMonitor
         private set
@@ -129,6 +135,11 @@ class RuncodeApp : Application() {
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )
+        mcpTunnel = McpTunnel(
+            connector = SshTunnelConnector(),
+            onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
+        )
+        watchDefaultNetwork()
 
         CoroutineScope(Dispatchers.IO).launch {
             seedStarterProjectsIfEmpty()
@@ -152,6 +163,27 @@ class RuncodeApp : Application() {
     fun regenerateMcpToken(): String {
         secretStore.removeSecret(MCP_TOKEN_KEY)
         return mcpToken()
+    }
+
+    /**
+     * Reconnects the public tunnel when the default network changes, e.g. Wi-Fi to mobile
+     * data or a VPN coming up or reconnecting, instead of waiting for keepalives to time out.
+     */
+    private fun watchDefaultNetwork() {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
+        try {
+            connectivity.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+                // The first call reports the network at registration, not a change.
+                private var registered = false
+
+                override fun onAvailable(network: Network) {
+                    if (registered) mcpTunnel.onNetworkChanged()
+                    registered = true
+                }
+            })
+        } catch (e: RuntimeException) {
+            logManager.log(MCP_LOG_ID, "MCP Bridge", LogLevel.WARN, "Network changes are not tracked: ${e.message}")
+        }
     }
 
     private fun runPythonSnippet(code: String, workingDir: File): String {
