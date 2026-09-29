@@ -39,7 +39,8 @@ secrets and MCP, then implements the project-settings step from the supplied roa
   `79ec58edc23d6025d525ef6015dab79027e82e3c9580eb9409b091675481c44a`.
   Local output: `app/build/outputs/apk/debug/app-debug.apk`.
 - API 36 UI, Android Keystore and physical-device validation: pending; no device was connected.
-- Release-signed build: not created. This change remains [draft PR #1](https://github.com/hami9/runcode/pull/1).
+- These results describe the review build in [PR #1](https://github.com/hami9/runcode/pull/1).
+  Release build validation is recorded separately in the GitHub release notes.
 
 ## Remaining work
 
