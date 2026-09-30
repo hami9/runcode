@@ -232,9 +232,11 @@ class StaticWebEngine(
 
     /**
      * Maps a request path onto a file inside [sourceDir], falling back to the entrypoint so
-     * single-page apps keep working. Returns null when the path escapes the source directory.
+     * single-page apps keep working. Returns null when the path escapes the source directory,
+     * and a file that does not exist when the request names a missing file, which the caller
+     * answers with 404.
      */
-    private fun resolveTarget(sourceDir: File, rawPath: String, entryPoint: String): File? {
+    internal fun resolveTarget(sourceDir: File, rawPath: String, entryPoint: String): File? {
         val decoded = try {
             URLDecoder.decode(rawPath, "UTF-8")
         } catch (_: Exception) {
@@ -246,8 +248,21 @@ class StaticWebEngine(
         if (!isInside(candidate, sourceDir)) return null
         if (candidate.isFile) return candidate
 
+        // A single-page app routes /dashboard through index.html, so an unknown route falls
+        // back to the entrypoint. A request that names a file does not: answering /app.css
+        // with the HTML page, and a 200 at that, broke pages quietly and hid typos in asset
+        // paths. Missing files get a 404 instead.
+        if (namesAFile(requested)) return candidate
+
         val fallback = File(sourceDir, entryPoint).canonicalFile
         return if (isInside(fallback, sourceDir)) fallback else null
+    }
+
+    /** True when the last path segment carries an extension, e.g. `app.css` but not `dashboard`. */
+    private fun namesAFile(path: String): Boolean {
+        val name = path.trimEnd('/').substringAfterLast('/')
+        val dot = name.lastIndexOf('.')
+        return dot > 0 && dot < name.length - 1
     }
 
     private fun isInside(candidate: File, root: File): Boolean {
