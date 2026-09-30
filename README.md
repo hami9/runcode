@@ -9,15 +9,19 @@ client drive the whole thing.
 
 ## Screenshots
 
-Taken on a Galaxy S9 (Android 10, arm64-v8a) running the release build.
+Taken on a Galaxy S9 (Android 10, arm64-v8a).
 
 | Home | Editor and console | File manager |
 |---|---|---|
 | <img src="docs/screenshots/home.png" width="240" alt="Home screen with project stats and starter profiles"> | <img src="docs/screenshots/editor.png" width="240" alt="Editor running a Python script with its output in the console"> | <img src="docs/screenshots/file-manager.png" width="240" alt="File manager showing the whole project tree"> |
 
-| SQLite browser | Shell |
-|---|---|
-| <img src="docs/screenshots/database.png" width="240" alt="SQLite browser listing tables and query results"> | <img src="docs/screenshots/shell.png" width="240" alt="Shell session in the app sandbox"> |
+| SQLite browser | Shell | Services |
+|---|---|---|
+| <img src="docs/screenshots/database.png" width="240" alt="SQLite browser listing tables and query results"> | <img src="docs/screenshots/shell.png" width="240" alt="Shell session in the app sandbox"> | <img src="docs/screenshots/services.png" width="240" alt="Supervisor showing a running service with uptime, CPU and heap"> |
+
+| System |
+|---|
+| <img src="docs/screenshots/system.png" width="240" alt="System screen reporting Android version, ABIs, interpreter and memory"> |
 
 ## Build
 
