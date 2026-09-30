@@ -46,6 +46,7 @@ import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.SuggestionChipDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -87,7 +88,13 @@ fun DatabaseScreen(
     val tables by viewModel.dbTables.collectAsState()
     val queryResult by viewModel.queryResult.collectAsState()
 
-    var sqlInput by remember { mutableStateOf("SELECT * FROM tasks LIMIT 25") }
+    // Follows the query the view model runs when a database loads. It used to be hardcoded to
+    // "SELECT * FROM tasks LIMIT 25", so the box showed a query that was never executed — and
+    // in any project without a `tasks` table, pressing Execute SQL failed.
+    var sqlInput by remember { mutableStateOf("") }
+    LaunchedEffect(selectedDb, tables) {
+        tables.firstOrNull()?.let { first -> sqlInput = "SELECT * FROM `${first.name}` LIMIT 25" }
+    }
     var dbDropdownExpanded by remember { mutableStateOf(false) }
 
     Column(

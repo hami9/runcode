@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -114,7 +116,7 @@ fun ServicesScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                 Text("Service Supervisor", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
                 Text("Local process runtime, health & log stream", fontSize = 12.sp, color = TextSecondary)
             }
@@ -128,7 +130,7 @@ fun ServicesScreen(
                     },
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("Stop All", color = AccentRed)
+                    Text("Stop All", color = AccentRed, maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -226,6 +228,7 @@ fun ServicesScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(DarkSurfaceElevated)
+                        .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
