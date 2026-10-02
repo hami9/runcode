@@ -108,6 +108,8 @@ chaquopy {
         pip {
             install("python-telegram-bot==21.9")
             install("requests==2.32.3")
+            // Pure-Python git for the Git screen; a native git binary cannot run on Android.
+            install("dulwich==1.2.15")
         }
     }
 }

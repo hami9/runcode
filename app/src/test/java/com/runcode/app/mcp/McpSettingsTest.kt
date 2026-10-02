@@ -31,7 +31,7 @@ class McpSettingsTest {
         runBlocking { app.appMetaDatabase.insertOrUpdateProject(project) }
         host = McpToolHost(app.projectStorage, app.appMetaDatabase, app.projectDatabaseManager,
             app.serviceSupervisor, app.logManager, app.terminalSession, { _, _ -> "unused" },
-            app.projectSettings, { notifications.add(it) }, { "diagnostics report" }, { _, _ -> "backup" })
+            app.projectSettings, { notifications.add(it) }, { "diagnostics report" }, { _, _ -> "backup" }, { app.git })
     }
 
     @Test fun `mcp replaces plain variables but preserves secret references`() = runBlocking {

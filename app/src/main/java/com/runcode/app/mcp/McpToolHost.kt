@@ -3,6 +3,7 @@ package com.runcode.app.mcp
 import com.runcode.app.database.AppMetaDatabase
 import com.runcode.app.database.ProjectDatabaseManager
 import com.runcode.app.domain.models.Project
+import com.runcode.app.git.GitManager
 import com.runcode.app.logging.LogManager
 import com.runcode.app.storage.ProjectStorage
 import com.runcode.app.settings.ProjectSettingsManager
@@ -28,7 +29,9 @@ class McpToolHost(
     /** Runs the same checks as the System screen and returns the plain-text report. */
     val runDiagnostics: () -> String,
     /** Backs a project up locally, and to the chosen folder when asked. Returns a summary. */
-    val backupProject: suspend (project: Project, toFolder: Boolean) -> String
+    val backupProject: suspend (project: Project, toFolder: Boolean) -> String,
+    /** Lazy, because building it touches the vault and preferences. */
+    val git: () -> GitManager
 ) {
     suspend fun projectOrNull(projectId: String): Project? =
         appMetaDatabase.getAllProjects().find { it.id == projectId }

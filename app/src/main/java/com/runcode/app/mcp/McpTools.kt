@@ -1,6 +1,7 @@
 package com.runcode.app.mcp
 
 import com.runcode.app.domain.models.Project
+import com.runcode.app.git.GitException
 import com.runcode.app.domain.models.RestartPolicy
 import com.runcode.app.security.SecretRedactor
 import com.runcode.app.settings.EnvironmentEdit
@@ -239,6 +240,48 @@ object McpTools {
 
         tools.put(
             tool(
+                "git_status",
+                "Git state of a project's source/ folder: branch, staged/unstaged/untracked files, " +
+                    "commits ahead of or behind origin, and the remote URL.",
+                properties("project_id" to stringProp("Project id")),
+                required = listOf("project_id")
+            )
+        )
+
+        tools.put(
+            tool(
+                "git_commit",
+                "Commit in a project's source/ folder using the author set in the app. Stages every change " +
+                    "first unless stage_all is false. Initialises the repository if there is none.",
+                properties(
+                    "project_id" to stringProp("Project id"),
+                    "message" to stringProp("Commit message"),
+                    "stage_all" to JSONObject().put("type", "boolean")
+                ),
+                required = listOf("project_id", "message")
+            )
+        )
+
+        tools.put(
+            tool(
+                "git_push",
+                "Push the current branch to origin with the GitHub token stored in the app. The token is never returned.",
+                properties("project_id" to stringProp("Project id")),
+                required = listOf("project_id")
+            )
+        )
+
+        tools.put(
+            tool(
+                "git_pull",
+                "Fetch and fast-forward the current branch from origin. Refuses when histories have diverged.",
+                properties("project_id" to stringProp("Project id")),
+                required = listOf("project_id")
+            )
+        )
+
+        tools.put(
+            tool(
                 "run_diagnostics",
                 "Check the device and network: storage, memory, notification and battery settings, Python, " +
                     "the foreground service, the last crash, DNS, HTTPS, Telegram API reachability, whether each " +
@@ -286,6 +329,10 @@ object McpTools {
                     args.optString("database").ifBlank { null }
                 )
                 "run_diagnostics" -> textResult(host.runDiagnostics())
+                "git_status" -> gitStatus(host, args.getString("project_id"))
+                "git_commit" -> gitCommit(host, args.getString("project_id"), args.getString("message"), args.optBoolean("stage_all", true))
+                "git_push" -> gitPush(host, args.getString("project_id"))
+                "git_pull" -> gitPull(host, args.getString("project_id"))
                 "backup_project" -> backupProject(host, args.getString("project_id"), args.optBoolean("to_folder", false))
                 else -> errorResult("Unknown tool: $name")
             }
@@ -513,6 +560,53 @@ object McpTools {
             )
         }
         return textResult(array.toString(2))
+    }
+
+    private fun <T> withRepo(host: McpToolHost, projectId: String, block: suspend (Project) -> T): JSONObject = runBlocking {
+        val project = host.projectOrNull(projectId) ?: return@runBlocking errorResult("Project not found")
+        try {
+            val result = block(project)
+            if (result is JSONObject) result else textResult(result.toString())
+        } catch (e: GitException) {
+            errorResult(e.message ?: "git failed")
+        }
+    }
+
+    private fun gitStatus(host: McpToolHost, projectId: String) = withRepo(host, projectId) { project ->
+        val git = host.git()
+        if (!git.isRepository(project)) return@withRepo "No repository yet. git_commit creates one."
+        val s = git.status(project)
+        JSONObject()
+            .put("branch", s.branch ?: JSONObject.NULL)
+            .put("head", s.head ?: JSONObject.NULL)
+            .put("staged", JSONArray(s.staged))
+            .put("unstaged", JSONArray(s.unstaged))
+            .put("untracked", JSONArray(s.untracked))
+            .put("ahead", s.ahead ?: JSONObject.NULL)
+            .put("behind", s.behind ?: JSONObject.NULL)
+            .put("remote", s.remote ?: JSONObject.NULL)
+            .toString(2)
+    }
+
+    private fun gitCommit(host: McpToolHost, projectId: String, message: String, stageAll: Boolean) =
+        withRepo(host, projectId) { project ->
+            val git = host.git()
+            if (!git.isRepository(project)) git.init(project)
+            if (stageAll) git.stage(project)
+            val sha = git.commit(project, message)
+            host.onProjectChanged(project.id)
+            "Committed $sha on ${git.status(project).branch}"
+        }
+
+    private fun gitPush(host: McpToolHost, projectId: String) = withRepo(host, projectId) { project ->
+        host.git().push(project)
+        "Pushed ${host.git().status(project).branch} to origin"
+    }
+
+    private fun gitPull(host: McpToolHost, projectId: String) = withRepo(host, projectId) { project ->
+        val count = host.git().pull(project)
+        host.onProjectChanged(project.id)
+        if (count == 0) "Already up to date" else "Pulled $count new commit(s)"
     }
 
     private fun backupProject(host: McpToolHost, projectId: String, toFolder: Boolean): JSONObject = runBlocking {

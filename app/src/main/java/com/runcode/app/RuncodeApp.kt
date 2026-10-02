@@ -10,6 +10,8 @@ import com.runcode.app.backup.FolderBackups
 import com.runcode.app.database.AppMetaDatabase
 import com.runcode.app.database.ProjectDatabaseManager
 import com.runcode.app.diagnostics.DiagnosticsRunner
+import com.runcode.app.git.ChaquopyGitBackend
+import com.runcode.app.git.GitManager
 import com.runcode.app.domain.models.LogLevel
 import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
@@ -74,6 +76,11 @@ class RuncodeApp : Application() {
         private set
 
     val diagnostics: DiagnosticsRunner by lazy { DiagnosticsRunner(this) }
+
+    val git: GitManager by lazy {
+        GitManager(ChaquopyGitBackend(), projectStorage, projectArchive, secretStore,
+            getSharedPreferences("git", MODE_PRIVATE))
+    }
     lateinit var processMonitor: ProcessMonitor
         private set
     lateinit var projectArchive: ProjectArchive
@@ -146,7 +153,8 @@ class RuncodeApp : Application() {
                 projectSettings = projectSettings,
                 onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) },
                 runDiagnostics = { diagnostics.run().toText() },
-                backupProject = ::backupProjectForMcp
+                backupProject = ::backupProjectForMcp,
+                git = { git }
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )
