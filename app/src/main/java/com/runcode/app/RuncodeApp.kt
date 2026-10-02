@@ -3,6 +3,7 @@ package com.runcode.app
 import android.app.Application
 import android.net.ConnectivityManager
 import android.net.Network
+import androidx.annotation.VisibleForTesting
 import com.chaquo.python.Python
 import com.runcode.app.backup.BackupFolderSettings
 import com.runcode.app.backup.BackupManager
@@ -11,6 +12,7 @@ import com.runcode.app.database.AppMetaDatabase
 import com.runcode.app.database.ProjectDatabaseManager
 import com.runcode.app.diagnostics.DiagnosticsRunner
 import com.runcode.app.git.ChaquopyGitBackend
+import com.runcode.app.git.GitBackend
 import com.runcode.app.git.GitManager
 import com.runcode.app.domain.models.LogLevel
 import com.runcode.app.domain.models.Project
@@ -77,9 +79,12 @@ class RuncodeApp : Application() {
 
     val diagnostics: DiagnosticsRunner by lazy { DiagnosticsRunner(this) }
 
+    /** Tests swap this for the host's Python before first use of [git]. */
+    @VisibleForTesting
+    var gitBackend: GitBackend = ChaquopyGitBackend()
+
     val git: GitManager by lazy {
-        GitManager(ChaquopyGitBackend(), projectStorage, projectArchive, secretStore,
-            getSharedPreferences("git", MODE_PRIVATE))
+        GitManager(gitBackend, projectStorage, projectArchive, secretStore, getSharedPreferences("git", MODE_PRIVATE))
     }
     lateinit var processMonitor: ProcessMonitor
         private set
@@ -95,6 +100,11 @@ class RuncodeApp : Application() {
      * editor and file tree can show an AI client's edits without a manual refresh.
      */
     val projectChanges: SharedFlow<String> = _projectChanges
+
+    /** Something other than the editor rewrote a project's files (MCP, git pull, checkout). */
+    fun notifyProjectChanged(projectId: String) {
+        _projectChanges.tryEmit(projectId)
+    }
 
     var isPythonAvailable: Boolean = false
         private set

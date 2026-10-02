@@ -80,6 +80,27 @@ just `source/`, so whatever a script writes into `data/` is visible too.
 
 Binary files and files over 512 KB do not open in the editor; they can still be saved out.
 
+## Git
+
+**Git** works on the selected project's `source/` folder, so `data/`, logs and secrets never
+end up in commits. It runs on [dulwich](https://www.dulwich.io), a pure-Python git bundled with
+the app, because a native git binary cannot be shipped or executed on Android.
+
+- **Initialise repository** creates one on `main` with a `.gitignore` for Python caches.
+- The screen lists staged, changed and new files; commit with or without staging everything
+  first, and see the last 30 commits.
+- **Branch** switches or creates branches. Switching refuses to overwrite uncommitted changes.
+- **Remote**, **Push** and **Pull** work against GitHub or any smart-HTTP git server. Pull only
+  fast-forwards: when histories have diverged it says so instead of merging.
+- **Clone** creates a new project from a URL, with the entry point detected as for a zip.
+- **Settings** holds the author name and email (GitHub matches commits to accounts by email)
+  and a GitHub token. Use a fine-grained token with *Contents: read and write*. It is kept in
+  the Keystore-backed vault, never shown again, scrubbed from errors and never written into the
+  repository's config.
+
+Git operations that rewrite files refuse while the editor has unsaved changes. SSH remotes
+are not supported; use HTTPS URLs.
+
 ## Backups
 
 **Backups** creates checksummed archives of a project's `source/` and `data/`. Secrets, logs
@@ -142,10 +163,10 @@ Authorization: Bearer <token from the System screen>
 Content-Type: application/json
 ```
 
-Nineteen tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
+Twenty-three tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
 `create_directory`, `rename_path`, `delete_path`, `set_entry_point`, `start_service`,
 `stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`,
-`run_diagnostics`, `backup_project`.
+`run_diagnostics`, `backup_project`, `git_status`, `git_commit`, `git_push`, `git_pull`.
 
 File changes made over the bridge show up in the app straight away: the file tree refreshes,
 and a file open in the editor reloads unless it has unsaved edits.
@@ -217,6 +238,7 @@ The bridge exposes a shell, arbitrary Python and read/write file access on the d
 app/src/main/java/com/runcode/app/
   runtime/     PythonEngine (Chaquopy), StaticWebEngine, engine contracts
   supervisor/  ServiceSupervisor — lifecycle, restart policy, ports, wake lock
+  git/         GitManager over runcode_git.py (dulwich); token in the vault
   backup/      Checksummed archives, backups to a user-chosen folder (SAF), daily runs
   diagnostics/ Device and network checks behind the System screen and run_diagnostics
   terminal/    TerminalSession — interactive sh plus one-shot command runner
@@ -227,14 +249,20 @@ app/src/main/java/com/runcode/app/
   ui/          Compose screens
 app/src/main/python/
   runcode_runner.py   stdout/stderr bridge, cooperative stop, snippet runner
+  runcode_git.py      git on dulwich, JSON in and out, credentials scrubbed
 ```
 
 ## Tests
 
 ```bash
+python -m pip install dulwich==1.2.15
 python -m unittest discover -s tests -v
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
+
+Git tests in both suites run the real `runcode_git.py`. The Kotlin ones use the Python named by
+`RUNCODE_TEST_PYTHON` or `RUNCODE_BUILD_PYTHON`, or `python3`, and are skipped when none of
+them can import dulwich.
 
 The JVM tests cover settings validation, vault rollback, secret handling, archive paths,
 editor ownership, supervisor restarts, diagnostics rules and probes, folder backups through a

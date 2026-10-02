@@ -19,6 +19,9 @@ import com.runcode.app.domain.models.RuntimeEvent
 import com.runcode.app.domain.models.RuntimeInstance
 import com.runcode.app.domain.models.TableInfo
 import com.runcode.app.diagnostics.DiagnosticReport
+import com.runcode.app.git.GitCommit
+import com.runcode.app.git.GitIdentity
+import com.runcode.app.git.GitStatus
 import com.runcode.app.mcp.McpServerState
 import com.runcode.app.mcp.McpTunnelState
 import com.runcode.app.mcp.TunnelStatus
@@ -145,6 +148,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val threads: Int = 0
     )
 
+    /** Everything the Git screen shows for the selected project. */
+    data class GitUiState(
+        val projectId: String? = null,
+        val isRepository: Boolean = false,
+        val status: GitStatus? = null,
+        val branches: List<String> = emptyList(),
+        val log: List<GitCommit> = emptyList(),
+        val busy: String? = null,
+        val error: String? = null
+    )
+
+    private val _git = MutableStateFlow(GitUiState())
+    val git: StateFlow<GitUiState> = _git.asStateFlow()
+
     private val _diagnostics = MutableStateFlow<DiagnosticReport?>(null)
     val diagnostics: StateFlow<DiagnosticReport?> = _diagnostics.asStateFlow()
 
@@ -243,6 +260,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun mcpLanAddress(): String = app.portManager.getLanIp()
 
+
+    // ---------------------------------------------------------------- git
+
+    val gitIdentity: GitIdentity get() = app.git.identity
+    val gitHasToken: Boolean get() = app.git.hasToken
+
+    fun refreshGit() {
+        val project = _selectedProject.value ?: run { _git.value = GitUiState(); return }
+        gitTask(project, null) { refreshGitState(project) }
+    }
+
+    private suspend fun refreshGitState(project: Project, error: String? = null) {
+        val git = app.git
+        if (!git.isRepository(project)) {
+            _git.value = GitUiState(projectId = project.id, error = error)
+            return
+        }
+        val status = git.status(project)
+        val (_, branches) = git.branches(project)
+        _git.value = GitUiState(project.id, true, status, branches, git.log(project), error = error)
+    }
+
+    fun gitInit() = gitAction("Initialising") { app.git.init(it); "Repository created on main" }
+
+    fun gitStageAll() = gitAction("Staging") { app.git.stage(it); null }
+
+    fun gitCommit(message: String, stageAll: Boolean) = gitAction("Committing") { project ->
+        if (stageAll) app.git.stage(project)
+        "Committed ${app.git.commit(project, message)}"
+    }
+
+    fun gitPush() = gitAction("Pushing") { app.git.push(it); "Pushed to origin" }
+
+    fun gitPull() = gitAction("Pulling", changesFiles = true) { project ->
+        val count = app.git.pull(project)
+        if (count == 0) "Already up to date" else "Pulled $count new commit(s)"
+    }
+
+    fun gitCheckout(branch: String, create: Boolean) = gitAction("Switching branch", changesFiles = true) { project ->
+        app.git.checkout(project, branch, create)
+        "On branch $branch"
+    }
+
+    fun gitSetRemote(url: String) = gitAction("Saving remote") { app.git.setRemote(it, url); "Remote saved" }
+
+    fun saveGitSettings(name: String, email: String, token: String?) {
+        app.git.identity = GitIdentity(name, email)
+        try {
+            token?.let { app.git.setToken(it) }
+            _userMessage.value = if (token?.isBlank() == true) "Git settings saved; token removed" else "Git settings saved"
+        } catch (e: Exception) {
+            _userMessage.value = e.message
+        }
+    }
+
+    /** Clones into a new project, saves it and opens it. */
+    fun gitClone(url: String) {
+        if (_git.value.busy != null) return
+        _git.value = _git.value.copy(busy = "Cloning", error = null)
+        viewModelScope.launch {
+            try {
+                val project = app.git.cloneProject(url)
+                app.appMetaDatabase.insertOrUpdateProject(project)
+                loadProjects()
+                selectProject(project)
+                _userMessage.value = "Cloned into '${project.name}'"
+                _git.value = GitUiState()
+                refreshGit()
+            } catch (e: Exception) {
+                _git.value = _git.value.copy(busy = null, error = e.message)
+            }
+        }
+    }
+
+    /**
+     * Runs a git operation on the selected project and refreshes the screen. Operations that
+     * rewrite files refuse while the editor has unsaved changes, which they would otherwise
+     * be silently overwritten by on the next save.
+     */
+    private fun gitAction(label: String, changesFiles: Boolean = false, block: suspend (Project) -> String?) {
+        val project = _selectedProject.value ?: return
+        if (changesFiles && _isDirty.value) {
+            _git.value = _git.value.copy(error = "Save the file open in the editor first.")
+            return
+        }
+        gitTask(project, label) {
+            val message = block(project)
+            if (changesFiles) app.notifyProjectChanged(project.id)
+            refreshGitState(project)
+            message?.let { _userMessage.value = it }
+        }
+    }
+
+    private fun gitTask(project: Project, label: String?, block: suspend () -> Unit) {
+        if (_git.value.busy != null) return
+        _git.value = _git.value.copy(projectId = project.id, busy = label ?: "Loading", error = null)
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: Exception) {
+                runCatching { refreshGitState(project, e.message ?: e.javaClass.simpleName) }
+                    .onFailure { _git.value = _git.value.copy(error = e.message) }
+            } finally {
+                _git.value = _git.value.copy(busy = null)
+            }
+        }
+    }
 
     // ---------------------------------------------------------------- diagnostics
 

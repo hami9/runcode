@@ -55,6 +55,7 @@ import com.runcode.app.ui.navigation.Screen
 import com.runcode.app.ui.screens.BackupsScreen
 import com.runcode.app.ui.screens.DatabaseScreen
 import com.runcode.app.ui.screens.EditorScreen
+import com.runcode.app.ui.screens.GitScreen
 import com.runcode.app.ui.screens.HealthScreen
 import com.runcode.app.ui.screens.HomeScreen
 import com.runcode.app.ui.screens.ProjectsScreen
@@ -140,6 +141,7 @@ fun MainApp(viewModel: MainViewModel) {
                 Screen.HOME -> HomeScreen(viewModel = viewModel, onNavigate = { currentScreen = it })
                 Screen.PROJECTS -> ProjectsScreen(viewModel = viewModel, onNavigate = { currentScreen = it })
                 Screen.EDITOR -> EditorScreen(viewModel = viewModel)
+                Screen.GIT -> GitScreen(viewModel = viewModel)
                 Screen.TERMINAL -> TerminalScreen(viewModel = viewModel)
                 Screen.SERVICES -> ServicesScreen(viewModel = viewModel)
                 Screen.DATABASE -> DatabaseScreen(viewModel = viewModel)
@@ -151,7 +153,7 @@ fun MainApp(viewModel: MainViewModel) {
 }
 
 /**
- * Eight destinations do not fit a phone width. Material's NavigationBar distributes its items
+ * Nine destinations do not fit a phone width. Material's NavigationBar distributes its items
  * with weights, which collapses under the infinite width a horizontal scroll hands it, so the
  * bar is laid out by hand instead: fixed-width items in a scrolling row.
  */
