@@ -102,6 +102,18 @@ class FolderBackupsTest {
         assertEquals(1, storage.getBackupsDir(p.id).listFiles()!!.size)
     }
 
+    @Test fun `automatic names use UTC so they sort by creation time`() {
+        val original = java.util.TimeZone.getDefault()
+        try {
+            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Asia/Tehran"))
+            val name = folder.fileName(project("Zone"), automatic = true)
+            // 1_760_000_000_000 ms is 2025-10-09 08:53:20 UTC.
+            assertTrue(name, name.endsWith("-20251009-085320.rcpkg"))
+        } finally {
+            java.util.TimeZone.setDefault(original)
+        }
+    }
+
     @Test fun `pruning only applies to the same project`() = runBlocking {
         val a = project("A")
         val b = project("B")

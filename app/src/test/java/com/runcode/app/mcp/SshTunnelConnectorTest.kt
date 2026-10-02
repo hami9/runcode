@@ -16,6 +16,8 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
@@ -32,6 +34,7 @@ class SshTunnelConnectorTest {
 
     private lateinit var relay: SshServer
     private lateinit var bridge: ServerSocket
+    private val knownHosts = File.createTempFile("known_hosts", "").apply { delete() }
     private val forwardedPort = AtomicInteger(-1)
     private val shellOpened = CountDownLatch(1)
 
@@ -106,7 +109,7 @@ class SshTunnelConnectorTest {
     }
 
     @Test fun `port 0 forward reaches the local bridge and reports the relay URL`() {
-        val opened = SshTunnelConnector().open(relayProvider(remotePort = 0), bridge.localPort, 10_000)
+        val opened = SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000)
         try {
             assertEquals("https://test-1-2-3-4.run.pinggy-free.link", opened.url)
             assertTrue(opened.connection.isAlive)
@@ -119,7 +122,7 @@ class SshTunnelConnectorTest {
 
     @Test fun `fixed remote port works as localhost run expects`() {
         val fixed = ServerSocket(0).use { it.localPort }
-        val opened = SshTunnelConnector().open(relayProvider(remotePort = fixed), bridge.localPort, 10_000)
+        val opened = SshTunnelConnector(knownHosts).open(relayProvider(remotePort = fixed), bridge.localPort, 10_000)
         try {
             assertEquals(fixed, forwardedPort.get())
             assertTrue(requestThroughRelay().endsWith("pong"))
@@ -129,7 +132,7 @@ class SshTunnelConnectorTest {
     }
 
     @Test fun `relay stopping is seen as a dead connection`() {
-        val opened = SshTunnelConnector().open(relayProvider(remotePort = 0), bridge.localPort, 10_000)
+        val opened = SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000)
         assertTrue(shellOpened.await(5, TimeUnit.SECONDS))
         relay.stop(true)
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
@@ -141,8 +144,47 @@ class SshTunnelConnectorTest {
     @Test fun `unreachable relay fails fast with a reason`() {
         val closed = ServerSocket(0).use { it.localPort }
         val error = runCatching {
-            SshTunnelConnector().open(TunnelProvider.PINGGY.copy(host = "127.0.0.1", port = closed), bridge.localPort, 3_000)
+            SshTunnelConnector(knownHosts).open(TunnelProvider.PINGGY.copy(host = "127.0.0.1", port = closed), bridge.localPort, 3_000)
         }.exceptionOrNull()
         assertNotNull(error)
+    }
+
+    @Test fun `the relay's key is trusted on first use and checked afterwards`() {
+        SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000).connection.close()
+        val saved = knownHosts.readText()
+        assertTrue(saved, saved.startsWith("[127.0.0.1]:${relay.port} "))
+
+        // Same server, same key: accepted, nothing new stored.
+        SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000).connection.close()
+        assertEquals(saved, knownHosts.readText())
+    }
+
+    @Test fun `a different key for a known relay is refused`() {
+        // Learn some other server's key, then record it as if it belonged to this relay.
+        val impostor = SshServer.setUpDefaultServer().apply {
+            port = 0
+            keyPairProvider = SimpleGeneratorHostKeyProvider()
+            passwordAuthenticator = PasswordAuthenticator { _, _, _ -> true }
+            forwardingFilter = AcceptAllForwardingFilter.INSTANCE
+            shellFactory = ShellFactory { BannerShell() }
+        }
+        impostor.start()
+        try {
+            SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0).copy(port = impostor.port), bridge.localPort, 10_000)
+                .connection.close()
+        } finally {
+            impostor.stop(true)
+        }
+        knownHosts.writeText(knownHosts.readText().replace("[127.0.0.1]:${impostor.port}", "[127.0.0.1]:${relay.port}"))
+
+        val error = runCatching {
+            SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000)
+        }.exceptionOrNull()
+        assertTrue(error.toString(), error is IOException)
+        assertTrue(error!!.message!!.contains("different host key"))
+        assertEquals("no forward may be set up for an untrusted relay", -1, forwardedPort.get())
+
+        TofuHostKeys.forgetAll(knownHosts)
+        SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000).connection.close()
     }
 }

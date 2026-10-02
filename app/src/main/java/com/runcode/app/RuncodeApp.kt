@@ -35,6 +35,7 @@ import com.runcode.app.system.CompatibilityManager
 import com.runcode.app.system.CrashReporter
 import com.runcode.app.system.ProcessMonitor
 import com.runcode.app.terminal.TerminalSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -76,6 +77,9 @@ class RuncodeApp : Application() {
         private set
     lateinit var mcpTunnel: McpTunnel
         private set
+
+    /** Host keys of the tunnel relays, trusted on first use. */
+    val tunnelHostKeys: File get() = File(filesDir, "tunnel_known_hosts")
 
     val diagnostics: DiagnosticsRunner by lazy { DiagnosticsRunner(this) }
 
@@ -169,7 +173,7 @@ class RuncodeApp : Application() {
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )
         mcpTunnel = McpTunnel(
-            connector = SshTunnelConnector(),
+            connector = SshTunnelConnector(tunnelHostKeys),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )
         watchDefaultNetwork()
@@ -220,13 +224,21 @@ class RuncodeApp : Application() {
     suspend fun runAutoBackupIfDue() {
         val now = System.currentTimeMillis()
         if (!backupFolder.isAutoDue(now)) return
-        val store = backupFolder.store()
-        val result = if (store == null) {
-            "Skipped: the backup folder is no longer accessible. Choose it again."
-        } else {
-            val projects = appMetaDatabase.getAllProjects()
-            val (done, error) = folderBackups.exportAll(store, projects)
-            if (error == null) "Backed up $done project(s)" else "Backed up $done of ${projects.size}. $error"
+        // Never throws: it runs in an endless loop and from the UI, and one failure must not
+        // end daily backups or crash the app.
+        val result = try {
+            val store = backupFolder.store()
+            if (store == null) {
+                "Skipped: the backup folder is no longer accessible. Choose it again."
+            } else {
+                val projects = appMetaDatabase.getAllProjects()
+                val (done, error) = folderBackups.exportAll(store, projects)
+                if (error == null) "Backed up $done project(s)" else "Backed up $done of ${projects.size}. $error"
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            "Failed: ${e.message ?: e.javaClass.simpleName}"
         }
         backupFolder.recordAutoRun(now, result)
         logManager.log(BACKUP_LOG_ID, "Backups", LogLevel.SYSTEM, "Automatic backup: $result")

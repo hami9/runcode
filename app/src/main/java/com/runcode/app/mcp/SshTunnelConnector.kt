@@ -3,8 +3,8 @@ package com.runcode.app.mcp
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
-import com.jcraft.jsch.UIKeyboardInteractive
-import com.jcraft.jsch.UserInfo
+import com.jcraft.jsch.JSchChangedHostKeyException
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
 
@@ -12,18 +12,27 @@ import java.io.InputStream
  * Opens a reverse tunnel the way `ssh -p 443 -R0:localhost:8765 free.pinggy.io` does: remote
  * forward to the local bridge, then read the public URL from the relay's shell output.
  */
-class SshTunnelConnector : TunnelConnector {
+class SshTunnelConnector(private val knownHosts: File) : TunnelConnector {
 
     override fun open(provider: TunnelProvider, localPort: Int, timeoutMs: Int): OpenTunnel {
         val session = JSch().getSession(provider.user, provider.host, provider.port)
-        // Free relays take no credentials and publish no host keys to pin. The tunnel URL is
-        // HTTPS, terminated at the relay; the bearer token is what guards the bridge.
-        session.setConfig("StrictHostKeyChecking", "no")
+        // Free relays take no credentials and publish no host keys to pin, so the first key
+        // each relay presents is trusted and a different one later is refused.
+        val hostKeys = TofuHostKeys(knownHosts)
+        session.hostKeyRepository = hostKeys
+        session.setConfig("StrictHostKeyChecking", "ask")
         session.setConfig("PreferredAuthentications", "none,keyboard-interactive,password")
-        session.userInfo = EmptyCredentials
+        session.userInfo = hostKeys.prompts
         session.setPassword("")
         try {
-            session.connect(timeoutMs)
+            try {
+                session.connect(timeoutMs)
+            } catch (e: JSchChangedHostKeyException) {
+                throw IOException(
+                    "${provider.host} presented a different host key than on first use. Someone may be " +
+                        "intercepting the connection. If the relay changed its key, use Forget relay keys."
+                )
+            }
             // Keepalives notice a dead socket within about 45 seconds.
             session.setServerAliveInterval(KEEPALIVE_MS)
             session.setServerAliveCountMax(3)
@@ -101,23 +110,6 @@ class SshTunnelConnector : TunnelConnector {
             channel.disconnect()
             session.disconnect()
         }
-    }
-
-    /** Answers every prompt with an empty string, as pressing Enter at the ssh prompt does. */
-    private object EmptyCredentials : UserInfo, UIKeyboardInteractive {
-        override fun getPassphrase(): String? = null
-        override fun getPassword(): String = ""
-        override fun promptPassword(message: String?) = true
-        override fun promptPassphrase(message: String?) = false
-        override fun promptYesNo(message: String?) = true
-        override fun showMessage(message: String?) = Unit
-        override fun promptKeyboardInteractive(
-            destination: String?,
-            name: String?,
-            instruction: String?,
-            prompt: Array<out String>?,
-            echo: BooleanArray?
-        ): Array<String> = Array(prompt?.size ?: 0) { "" }
     }
 
     private companion object {

@@ -24,6 +24,7 @@ import com.runcode.app.git.GitIdentity
 import com.runcode.app.git.GitStatus
 import com.runcode.app.mcp.McpServerState
 import com.runcode.app.mcp.McpTunnelState
+import com.runcode.app.mcp.TofuHostKeys
 import com.runcode.app.mcp.TunnelStatus
 import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.settings.ProjectSettings
@@ -237,6 +238,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setMcpPublic(enabled: Boolean) {
         _mcpPublic.value = enabled
         syncMcpTunnel()
+    }
+
+    /** For a relay that really did change its host key: trust the next key it presents. */
+    fun forgetRelayKeys() {
+        TofuHostKeys.forgetAll(app.tunnelHostKeys)
+        app.mcpTunnel.onNetworkChanged()
+        _userMessage.value = "Relay keys forgotten; the next ones will be trusted"
     }
 
     /** The tunnel forwards to the bridge, so it runs only while both are switched on. */

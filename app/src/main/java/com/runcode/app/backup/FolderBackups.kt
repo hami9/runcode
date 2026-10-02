@@ -10,6 +10,7 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 /**
  * Backups in a user-chosen folder: export with read-back verification, listing, restore, and
@@ -95,7 +96,11 @@ class FolderBackups(
         }
 
     fun fileName(project: Project, automatic: Boolean): String {
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(now()))
+        // UTC, so names sort in creation order across time-zone and daylight-saving changes;
+        // pruning relies on that order.
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+            .apply { timeZone = TimeZone.getTimeZone("UTC") }
+            .format(Date(now()))
         return if (automatic) "${autoPrefix(project)}$stamp${SafBackupStore.BACKUP_EXTENSION}"
         else "${safeName(project)}-${project.id}-$stamp${SafBackupStore.BACKUP_EXTENSION}"
     }

@@ -138,7 +138,7 @@ object DiagnosticRules {
                     check(SERVICES, s.name, INFO, "${s.profile.displayName}, does not serve a port")
                 s.probe == null -> check(SERVICES, s.name, INFO, "port ${s.port} not probed")
                 s.probe.ok -> check(SERVICES, s.name, PASS, "port ${s.port} accepts connections")
-                else -> check(SERVICES, s.name, FAIL, "port ${s.port} is not listening (${s.probe.detail})")
+                else -> check(SERVICES, s.name, FAIL, "port ${s.port} did not accept a connection (${s.probe.detail})")
             }
         }
     }

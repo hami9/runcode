@@ -637,6 +637,11 @@ private fun McpPublicUrlSection(viewModel: MainViewModel) {
     } else if (tunnel.status != TunnelStatus.OFF) {
         tunnel.lastError?.let {
             Text(text = it, fontSize = 10.sp, color = AccentRed, lineHeight = 14.sp)
+            if (it.contains("host key")) {
+                TextButton(onClick = { viewModel.forgetRelayKeys() }) {
+                    Text("Forget relay keys", fontSize = 11.sp, color = AccentCyan)
+                }
+            }
         }
         if (tunnel.failures >= 2) {
             Text(
