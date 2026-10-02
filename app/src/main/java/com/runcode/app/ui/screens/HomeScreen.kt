@@ -466,6 +466,13 @@ fun ProfileBadge(profile: ProjectProfile) {
             .background(bgColor)
             .padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
-        Text(profile.displayName, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = textColor)
+        Text(
+            profile.shortName,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            color = textColor,
+            maxLines = 1,
+            softWrap = false
+        )
     }
 }

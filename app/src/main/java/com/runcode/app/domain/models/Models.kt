@@ -1,11 +1,17 @@
 package com.runcode.app.domain.models
 
-enum class ProjectProfile(val id: String, val displayName: String, val defaultExtension: String) {
-    PYTHON_SCRIPT("python_script", "Python Script", "py"),
-    TELEGRAM_BOT("telegram_bot", "Telegram Bot", "py"),
-    PYTHON_HTTP("python_http", "Python HTTP API", "py"),
-    STATIC_WEB("static_web", "Static Website", "html"),
-    SQLITE_APP("sqlite_app", "SQLite Database App", "py")
+enum class ProjectProfile(
+    val id: String,
+    val displayName: String,
+    /** Fits the badge on a project card; a phone is about 360dp wide. */
+    val shortName: String,
+    val defaultExtension: String
+) {
+    PYTHON_SCRIPT("python_script", "Python Script", "Python", "py"),
+    TELEGRAM_BOT("telegram_bot", "Telegram Bot", "Telegram", "py"),
+    PYTHON_HTTP("python_http", "Python HTTP API", "HTTP API", "py"),
+    STATIC_WEB("static_web", "Static Website", "Static Web", "html"),
+    SQLITE_APP("sqlite_app", "SQLite Database App", "SQLite", "py")
 }
 
 enum class RestartPolicy {

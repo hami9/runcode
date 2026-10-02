@@ -57,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runcode.app.mcp.McpTools
@@ -560,10 +561,18 @@ fun HealthRow(label: String, value: String) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(label, fontSize = 12.sp, color = TextSecondary)
-        Text(value, fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = TextPrimary)
+        Text(label, fontSize = 12.sp, color = TextSecondary, modifier = Modifier.weight(1f))
+        Text(
+            value,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = TextPrimary,
+            textAlign = TextAlign.End,
+            modifier = Modifier.weight(1f)
+        )
     }
     Divider(color = DarkBorder.copy(alpha = 0.5f), modifier = Modifier.padding(vertical = 2.dp))
 }
