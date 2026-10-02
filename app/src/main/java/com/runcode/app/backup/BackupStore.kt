@@ -3,6 +3,7 @@ package com.runcode.app.backup
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.core.net.toUri
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -67,10 +68,10 @@ class SafBackupStore(private val context: Context, private val treeUri: Uri) : B
     }
 
     override fun open(id: String): InputStream =
-        resolver.openInputStream(Uri.parse(id)) ?: throw IOException("Cannot read $id")
+        resolver.openInputStream(id.toUri()) ?: throw IOException("Cannot read $id")
 
     override fun delete(id: String) {
-        if (!DocumentsContract.deleteDocument(resolver, Uri.parse(id))) throw IOException("Cannot delete $id")
+        if (!DocumentsContract.deleteDocument(resolver, id.toUri())) throw IOException("Cannot delete $id")
     }
 
     private fun displayName(document: Uri): String? =

@@ -1,5 +1,38 @@
 # Review notes
 
+## v1.5.0 (versionCode 6) — in progress on `ccr-00c06d8d-qqvzlg`
+
+Roadmap phases 3 (diagnostics) and 4 (backups to a chosen folder), plus a public URL for the
+MCP bridge.
+
+| Change | Where |
+| --- | --- |
+| LAN address prefers Wi-Fi, hotspot and Ethernet; mobile data and VPN interfaces are skipped. | `PortManager.getLanIp` |
+| **Public URL**: outbound SSH reverse tunnel (Pinggy on 443, localhost.run fallback) with backoff and reconnect on network change. Works behind NAT and with a VPN on. | `mcp/McpTunnel`, `mcp/SshTunnelConnector` |
+| **Diagnostics** card and `run_diagnostics`: app, network, service ports, bridge self-test. **Share logs** through a FileProvider. | `diagnostics/`, System screen |
+| **Backup folder** through the Storage Access Framework, export verified by read-back hash, restore from the folder, optional daily run keeping 7 automatic copies. `backup_project` MCP tool. | `backup/`, Backups screen |
+| Backup manifests are built with `JSONObject`; a quote in a project name broke restore. | `BackupManager` |
+| `serverInfo.version` reports the app version instead of `1.0.0`. | `McpServer` |
+
+Validation in this environment (no Android device or KVM available):
+
+- 87 JVM/Robolectric tests and 5 Python tests pass; `testDebugUnitTest lintDebug assembleDebug`
+  succeeds with 0 lint errors and the same 38 warnings as v1.4.0.
+- The tunnel runs the real JSch client against an in-process SSH server that behaves like
+  Pinggy, including an HTTP request through the forward. A JSch race in `channel.connect(timeout)`
+  failed about 2% of opens; the fix took a 150-run stress loop from 3 failures to 0.
+- The SAF store runs against a real `DocumentsProvider` under Robolectric.
+- The diagnostics runner runs against the real application object with live DNS, HTTPS and
+  Telegram probes.
+
+Not yet verified:
+
+- On a device: the Pinggy relay itself, the folder picker with Google Drive and OneDrive, the
+  share sheet, the diagnostics card on a 360dp screen, and notification/battery checks.
+- Release signing: `assembleRelease` with the release key and `apksigner verify`.
+
+## v1.4.0
+
 Baseline: `929cc23` on `main`. This pass covers the editor, runtime lifecycle, project storage,
 secrets and MCP, then implements the project-settings step from the supplied roadmap.
 

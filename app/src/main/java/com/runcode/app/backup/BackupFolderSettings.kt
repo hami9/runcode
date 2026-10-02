@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,7 +27,7 @@ class BackupFolderSettings(private val context: Context) {
     val state: StateFlow<BackupFolderState> = _state.asStateFlow()
 
     private val treeUri: Uri?
-        get() = prefs.getString(KEY_TREE, null)?.let(Uri::parse)
+        get() = prefs.getString(KEY_TREE, null)?.toUri()
 
     /** The folder as a store, or null when none is chosen or Android revoked access. */
     fun store(): BackupStore? = treeUri?.takeIf(::hasAccess)?.let { SafBackupStore(context, it) }
@@ -37,7 +39,7 @@ class BackupFolderSettings(private val context: Context) {
         treeUri?.takeIf { it != uri }?.let { old ->
             runCatching { context.contentResolver.releasePersistableUriPermission(old, flags) }
         }
-        prefs.edit().putString(KEY_TREE, uri.toString()).apply()
+        prefs.edit { putString(KEY_TREE, uri.toString()) }
         _state.value = load()
     }
 
@@ -49,12 +51,12 @@ class BackupFolderSettings(private val context: Context) {
                 )
             }
         }
-        prefs.edit().remove(KEY_TREE).putBoolean(KEY_AUTO, false).apply()
+        prefs.edit { remove(KEY_TREE).putBoolean(KEY_AUTO, false) }
         _state.value = load()
     }
 
     fun setAutoEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_AUTO, enabled).apply()
+        prefs.edit { putBoolean(KEY_AUTO, enabled) }
         _state.value = load()
     }
 
@@ -62,7 +64,7 @@ class BackupFolderSettings(private val context: Context) {
         prefs.getBoolean(KEY_AUTO, false) && now - prefs.getLong(KEY_LAST_AUTO, 0L) >= FolderBackups.AUTO_INTERVAL_MS
 
     fun recordAutoRun(time: Long, result: String) {
-        prefs.edit().putLong(KEY_LAST_AUTO, time).putString(KEY_LAST_RESULT, result).apply()
+        prefs.edit { putLong(KEY_LAST_AUTO, time).putString(KEY_LAST_RESULT, result) }
         _state.value = load()
     }
 

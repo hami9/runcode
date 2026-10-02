@@ -80,6 +80,39 @@ just `source/`, so whatever a script writes into `data/` is visible too.
 
 Binary files and files over 512 KB do not open in the editor; they can still be saved out.
 
+## Backups
+
+**Backups** creates checksummed archives of a project's `source/` and `data/`. Secrets, logs
+and caches are never included, and the checksum is verified before every restore.
+
+**Choose folder** keeps backups outside the app as well. The system folder picker accepts
+device storage, a memory card, or a cloud app that offers folders, such as Google Drive or
+OneDrive, with no account or API key in runcode. **Back up to folder** writes a fresh backup,
+reads the copy back and compares its SHA-256; a copy that does not match is removed. Backups
+already in the folder can be verified and restored from the same screen, including on another
+device.
+
+**Daily automatic backup** is off by default. When on, it backs up every project once a day
+while runcode is running, keeps the last 7 automatic copies per project and never deletes
+manual ones.
+
+## Diagnostics
+
+**System → Diagnostics → Run** checks the device and the network and produces a report to copy
+or share:
+
+- App: Android version and ABI, free storage and memory, notification permission, battery
+  optimisation, the Python interpreter, whether the foreground service really holds running
+  work, and the last crash.
+- Network: connection type and validation, VPN, LAN address, reserved ports, DNS, HTTPS, and
+  whether the Telegram API is reachable (bots need it; some networks block it).
+- Services: whether each running static site or Python HTTP API accepts connections on its
+  port. Other project types do not listen on a port and are not judged by one.
+- MCP bridge: a `GET /health` self-test, and the public tunnel's state.
+
+**Share logs** sends the latest report and every log line through the share sheet. Secrets
+were already redacted when each line was logged.
+
 ## Project settings
 
 Open **Projects → settings icon** to edit the port, restart policy, start on boot, CPU/heap/idle
@@ -109,9 +142,10 @@ Authorization: Bearer <token from the System screen>
 Content-Type: application/json
 ```
 
-Seventeen tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
+Nineteen tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
 `create_directory`, `rename_path`, `delete_path`, `set_entry_point`, `start_service`,
-`stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`.
+`stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`,
+`run_diagnostics`, `backup_project`.
 
 File changes made over the bridge show up in the app straight away: the file tree refreshes,
 and a file open in the editor reloads unless it has unsaved edits.
@@ -183,6 +217,8 @@ The bridge exposes a shell, arbitrary Python and read/write file access on the d
 app/src/main/java/com/runcode/app/
   runtime/     PythonEngine (Chaquopy), StaticWebEngine, engine contracts
   supervisor/  ServiceSupervisor — lifecycle, restart policy, ports, wake lock
+  backup/      Checksummed archives, backups to a user-chosen folder (SAF), daily runs
+  diagnostics/ Device and network checks behind the System screen and run_diagnostics
   terminal/    TerminalSession — interactive sh plus one-shot command runner
   mcp/         McpServer (JSON-RPC over HTTP), McpTools, McpToolHost, McpTunnel (public URL)
   storage/     Path-checked project files, zip import/export, entry-point tracking
@@ -201,7 +237,8 @@ python -m unittest discover -s tests -v
 ```
 
 The JVM tests cover settings validation, vault rollback, secret handling, archive paths,
-editor ownership and supervisor restarts. Robolectric tests use API 28; device testing is
+editor ownership, supervisor restarts, diagnostics rules and probes, folder backups through a
+real `DocumentsProvider`, and the public tunnel against an in-process SSH server. Robolectric tests use API 28; device testing is
 still needed for Keystore, Compose interaction and foreground-service behavior on API 36.
 
 ## License
