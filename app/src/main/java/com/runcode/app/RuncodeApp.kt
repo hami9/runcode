@@ -4,11 +4,14 @@ import android.app.Application
 import android.net.ConnectivityManager
 import android.net.Network
 import com.chaquo.python.Python
+import com.runcode.app.backup.BackupFolderSettings
 import com.runcode.app.backup.BackupManager
+import com.runcode.app.backup.FolderBackups
 import com.runcode.app.database.AppMetaDatabase
 import com.runcode.app.database.ProjectDatabaseManager
 import com.runcode.app.diagnostics.DiagnosticsRunner
 import com.runcode.app.domain.models.LogLevel
+import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.logging.LogManager
 import com.runcode.app.mcp.McpServer
@@ -32,6 +35,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.security.SecureRandom
@@ -51,6 +55,10 @@ class RuncodeApp : Application() {
     lateinit var projectDatabaseManager: ProjectDatabaseManager
         private set
     lateinit var backupManager: BackupManager
+        private set
+    lateinit var backupFolder: BackupFolderSettings
+        private set
+    lateinit var folderBackups: FolderBackups
         private set
     lateinit var compatibilityManager: CompatibilityManager
         private set
@@ -98,6 +106,8 @@ class RuncodeApp : Application() {
         appMetaDatabase = AppMetaDatabase(this)
         projectDatabaseManager = ProjectDatabaseManager()
         backupManager = BackupManager(this, projectStorage)
+        backupFolder = BackupFolderSettings(this)
+        folderBackups = FolderBackups(backupManager, cacheDir)
         projectArchive = ProjectArchive(this, projectStorage)
         compatibilityManager = CompatibilityManager(this)
         terminalSession = TerminalSession(this)
@@ -135,7 +145,8 @@ class RuncodeApp : Application() {
                 runPython = ::runPythonSnippet,
                 projectSettings = projectSettings,
                 onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) },
-                runDiagnostics = { diagnostics.run().toText() }
+                runDiagnostics = { diagnostics.run().toText() },
+                backupProject = ::backupProjectForMcp
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )
@@ -147,6 +158,13 @@ class RuncodeApp : Application() {
 
         CoroutineScope(Dispatchers.IO).launch {
             seedStarterProjectsIfEmpty()
+        }
+        // Daily backups only happen while the process is alive; the switch in the UI says so.
+        CoroutineScope(Dispatchers.IO).launch {
+            while (true) {
+                runAutoBackupIfDue()
+                delay(AUTO_BACKUP_CHECK_MS)
+            }
         }
     }
 
@@ -167,6 +185,33 @@ class RuncodeApp : Application() {
     fun regenerateMcpToken(): String {
         secretStore.removeSecret(MCP_TOKEN_KEY)
         return mcpToken()
+    }
+
+    private suspend fun backupProjectForMcp(project: Project, toFolder: Boolean): String {
+        if (!toFolder) {
+            val file = backupManager.createProjectBackup(project)
+            return "Created ${file.name} (${file.length()} bytes) in the project's backups/ folder."
+        }
+        val store = backupFolder.store()
+            ?: throw IllegalStateException("No backup folder is chosen. Pick one under Backups in the app.")
+        val stored = folderBackups.export(store, project)
+        return "Created a local backup and copied it to ${backupFolder.state.value.label} as ${stored.name}; the copy was read back and verified."
+    }
+
+    /** Backs every project up to the chosen folder when the daily run is switched on and due. */
+    suspend fun runAutoBackupIfDue() {
+        val now = System.currentTimeMillis()
+        if (!backupFolder.isAutoDue(now)) return
+        val store = backupFolder.store()
+        val result = if (store == null) {
+            "Skipped: the backup folder is no longer accessible. Choose it again."
+        } else {
+            val projects = appMetaDatabase.getAllProjects()
+            val (done, error) = folderBackups.exportAll(store, projects)
+            if (error == null) "Backed up $done project(s)" else "Backed up $done of ${projects.size}. $error"
+        }
+        backupFolder.recordAutoRun(now, result)
+        logManager.log(BACKUP_LOG_ID, "Backups", LogLevel.SYSTEM, "Automatic backup: $result")
     }
 
     /**
@@ -224,5 +269,7 @@ class RuncodeApp : Application() {
     private companion object {
         const val MCP_TOKEN_KEY = "MCP_BRIDGE_TOKEN"
         const val MCP_LOG_ID = "__mcp__"
+        const val BACKUP_LOG_ID = "__backup__"
+        const val AUTO_BACKUP_CHECK_MS = 60L * 60L * 1000L
     }
 }

@@ -8,7 +8,9 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.runcode.app.RuncodeApp
+import com.runcode.app.backup.BackupFolderState
 import com.runcode.app.backup.BackupPreview
+import com.runcode.app.backup.StoredBackup
 import com.runcode.app.domain.models.DeviceCapabilities
 import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
@@ -98,6 +100,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _backupPreview = MutableStateFlow<BackupPreview?>(null)
     val backupPreview: StateFlow<BackupPreview?> = _backupPreview.asStateFlow()
+
+    val backupFolderState: StateFlow<BackupFolderState> = app.backupFolder.state
+
+    private val _folderBackups = MutableStateFlow<List<StoredBackup>>(emptyList())
+    val folderBackups: StateFlow<List<StoredBackup>> = _folderBackups.asStateFlow()
+
+    private val _folderBusy = MutableStateFlow(false)
+    val folderBusy: StateFlow<Boolean> = _folderBusy.asStateFlow()
 
     // System Health
     private val _capabilities = MutableStateFlow<DeviceCapabilities?>(null)
@@ -890,6 +900,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _userMessage.value = "Successfully restored project '${restored.name}'"
             } catch (e: Exception) {
                 _userMessage.value = "Restore failed: ${e.message}"
+            }
+        }
+    }
+
+    // Backup folder (Storage Access Framework)
+
+    fun chooseBackupFolder(uri: Uri) {
+        try {
+            app.backupFolder.choose(uri)
+            refreshFolderBackups()
+        } catch (e: SecurityException) {
+            _userMessage.value = "That folder cannot be kept across restarts. Pick another one."
+        }
+    }
+
+    fun forgetBackupFolder() {
+        app.backupFolder.clear()
+        _folderBackups.value = emptyList()
+    }
+
+    fun setAutoBackup(enabled: Boolean) {
+        app.backupFolder.setAutoEnabled(enabled)
+        if (enabled) viewModelScope.launch(Dispatchers.IO) { app.runAutoBackupIfDue(); refreshFolderBackups() }
+    }
+
+    fun refreshFolderBackups() {
+        val store = app.backupFolder.store() ?: run { _folderBackups.value = emptyList(); return }
+        folderTask("Cannot read the backup folder") {
+            _folderBackups.value = app.folderBackups.list(store)
+        }
+    }
+
+    fun backupToFolder(project: Project) {
+        val store = app.backupFolder.store() ?: return
+        folderTask("Backup to folder failed") {
+            val stored = app.folderBackups.export(store, project)
+            refreshBackups(project.id)
+            _folderBackups.value = app.folderBackups.list(store)
+            _userMessage.value = "Saved and verified ${stored.name} in ${app.backupFolder.state.value.label}"
+        }
+    }
+
+    fun verifyFolderBackup(backup: StoredBackup) {
+        val store = app.backupFolder.store() ?: return
+        folderTask("Verification failed") {
+            _backupPreview.value = app.folderBackups.verify(store, backup)
+        }
+    }
+
+    fun restoreFolderBackup(backup: StoredBackup) {
+        val store = app.backupFolder.store() ?: return
+        folderTask("Restore failed") {
+            val restored = app.folderBackups.restore(store, backup)
+            app.appMetaDatabase.insertOrUpdateProject(restored)
+            loadProjects()
+            withContext(Dispatchers.Main) { selectProject(restored) }
+            _userMessage.value = "Restored '${restored.name}' from ${backup.name}"
+        }
+    }
+
+    private fun folderTask(failure: String, block: suspend () -> Unit) {
+        if (_folderBusy.value) return
+        _folderBusy.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                block()
+            } catch (e: Exception) {
+                _userMessage.value = "$failure: ${e.message}"
+            } finally {
+                _folderBusy.value = false
             }
         }
     }

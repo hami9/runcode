@@ -226,6 +226,19 @@ object McpTools {
 
         tools.put(
             tool(
+                "backup_project",
+                "Create a checksummed backup of a project's source/ and data/ (never secrets). With to_folder, " +
+                    "also copy it to the backup folder chosen in the app and verify the copy.",
+                properties(
+                    "project_id" to stringProp("Project id"),
+                    "to_folder" to JSONObject().put("type", "boolean")
+                ),
+                required = listOf("project_id")
+            )
+        )
+
+        tools.put(
+            tool(
                 "run_diagnostics",
                 "Check the device and network: storage, memory, notification and battery settings, Python, " +
                     "the foreground service, the last crash, DNS, HTTPS, Telegram API reachability, whether each " +
@@ -273,6 +286,7 @@ object McpTools {
                     args.optString("database").ifBlank { null }
                 )
                 "run_diagnostics" -> textResult(host.runDiagnostics())
+                "backup_project" -> backupProject(host, args.getString("project_id"), args.optBoolean("to_folder", false))
                 else -> errorResult("Unknown tool: $name")
             }
         } catch (e: Exception) {
@@ -499,6 +513,11 @@ object McpTools {
             )
         }
         return textResult(array.toString(2))
+    }
+
+    private fun backupProject(host: McpToolHost, projectId: String, toFolder: Boolean): JSONObject = runBlocking {
+        val project = host.projectOrNull(projectId) ?: return@runBlocking errorResult("Project not found")
+        textResult(host.backupProject(project, toFolder))
     }
 
     private fun getLogs(host: McpToolHost, projectId: String?, limit: Int): JSONObject {
