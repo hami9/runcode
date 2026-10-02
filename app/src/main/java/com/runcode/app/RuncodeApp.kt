@@ -7,6 +7,7 @@ import com.chaquo.python.Python
 import com.runcode.app.backup.BackupManager
 import com.runcode.app.database.AppMetaDatabase
 import com.runcode.app.database.ProjectDatabaseManager
+import com.runcode.app.diagnostics.DiagnosticsRunner
 import com.runcode.app.domain.models.LogLevel
 import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.logging.LogManager
@@ -63,6 +64,8 @@ class RuncodeApp : Application() {
         private set
     lateinit var mcpTunnel: McpTunnel
         private set
+
+    val diagnostics: DiagnosticsRunner by lazy { DiagnosticsRunner(this) }
     lateinit var processMonitor: ProcessMonitor
         private set
     lateinit var projectArchive: ProjectArchive
@@ -131,7 +134,8 @@ class RuncodeApp : Application() {
                 terminalSession = terminalSession,
                 runPython = ::runPythonSnippet,
                 projectSettings = projectSettings,
-                onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) }
+                onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) },
+                runDiagnostics = { diagnostics.run().toText() }
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )

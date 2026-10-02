@@ -224,6 +224,16 @@ object McpTools {
             )
         )
 
+        tools.put(
+            tool(
+                "run_diagnostics",
+                "Check the device and network: storage, memory, notification and battery settings, Python, " +
+                    "the foreground service, the last crash, DNS, HTTPS, Telegram API reachability, whether each " +
+                    "running web service accepts connections, and the bridge's own health. Takes up to ~10 s.",
+                JSONObject()
+            )
+        )
+
         return tools
     }
 
@@ -262,6 +272,7 @@ object McpTools {
                     args.getString("sql"),
                     args.optString("database").ifBlank { null }
                 )
+                "run_diagnostics" -> textResult(host.runDiagnostics())
                 else -> errorResult("Unknown tool: $name")
             }
         } catch (e: Exception) {

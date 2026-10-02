@@ -60,6 +60,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.runcode.app.diagnostics.CheckStatus
+import com.runcode.app.diagnostics.DiagnosticCheck
 import com.runcode.app.mcp.McpTools
 import com.runcode.app.mcp.TunnelStatus
 import com.runcode.app.ui.MainViewModel
@@ -207,6 +209,10 @@ fun HealthScreen(
             CrashReportCard(viewModel)
         }
 
+        item {
+            DiagnosticsCard(viewModel)
+        }
+
         // MCP Bridge
         item {
             McpBridgeCard(viewModel)
@@ -326,6 +332,95 @@ private fun CrashReportCard(viewModel: MainViewModel) {
                     Text("Dismiss", fontSize = 11.sp, color = TextMuted)
                 }
             }
+        }
+    }
+}
+
+/** Runs every check on demand and turns the result into something a user can paste. */
+@Composable
+private fun DiagnosticsCard(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    val report by viewModel.diagnostics.collectAsState()
+    val running by viewModel.diagnosticsRunning.collectAsState()
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Diagnostics", fontWeight = FontWeight.Bold, color = AccentCyan, fontSize = 14.sp)
+            Text(
+                text = report?.summary ?: "Checks settings, storage, Python, network, service ports and the MCP bridge.",
+                fontSize = 11.sp,
+                color = TextSecondary
+            )
+
+            report?.let { current ->
+                Spacer(modifier = Modifier.height(8.dp))
+                current.checks.groupBy { it.group }.forEach { (group, checks) ->
+                    Text(group, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextPrimary,
+                        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                    checks.forEach { check -> DiagnosticRow(check) }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = { viewModel.runDiagnostics() },
+                    enabled = !running,
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentCyan),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("diagnostics_run_btn")
+                ) {
+                    Text(if (running) "Checking…" else if (report == null) "Run" else "Run again",
+                        color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+                report?.let { current ->
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("runcode_diagnostics", current.toText()))
+                    }) {
+                        Text("Copy", fontSize = 11.sp, color = AccentCyan)
+                    }
+                }
+                TextButton(onClick = {
+                    viewModel.logShareIntent()?.let { intent ->
+                        try {
+                            context.startActivity(intent)
+                        } catch (_: android.content.ActivityNotFoundException) {
+                        }
+                    }
+                }) {
+                    Text("Share logs", fontSize = 11.sp, color = AccentCyan)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticRow(check: DiagnosticCheck) {
+    val color = when (check.status) {
+        CheckStatus.PASS -> AccentGreen
+        CheckStatus.WARN -> Color(0xFFFFB300)
+        CheckStatus.FAIL -> AccentRed
+        CheckStatus.INFO -> TextMuted
+    }
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+        Text(
+            text = check.status.name,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = color,
+            modifier = Modifier.width(36.dp)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(check.name, fontSize = 11.sp, color = TextPrimary)
+            Text(check.detail, fontSize = 10.sp, color = TextSecondary, lineHeight = 13.sp)
         }
     }
 }

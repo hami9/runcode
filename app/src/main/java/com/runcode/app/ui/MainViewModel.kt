@@ -1,8 +1,10 @@
 package com.runcode.app.ui
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.runcode.app.RuncodeApp
@@ -14,6 +16,7 @@ import com.runcode.app.domain.models.QueryResult
 import com.runcode.app.domain.models.RuntimeEvent
 import com.runcode.app.domain.models.RuntimeInstance
 import com.runcode.app.domain.models.TableInfo
+import com.runcode.app.diagnostics.DiagnosticReport
 import com.runcode.app.mcp.McpServerState
 import com.runcode.app.mcp.McpTunnelState
 import com.runcode.app.mcp.TunnelStatus
@@ -34,6 +37,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -129,6 +135,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val threads: Int = 0
     )
 
+    private val _diagnostics = MutableStateFlow<DiagnosticReport?>(null)
+    val diagnostics: StateFlow<DiagnosticReport?> = _diagnostics.asStateFlow()
+
+    private val _diagnosticsRunning = MutableStateFlow(false)
+    val diagnosticsRunning: StateFlow<Boolean> = _diagnosticsRunning.asStateFlow()
+
     private val _lastCrash = MutableStateFlow(app.lastCrashReport())
     val lastCrash: StateFlow<String?> = _lastCrash.asStateFlow()
 
@@ -221,6 +233,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun mcpLanAddress(): String = app.portManager.getLanIp()
 
+
+    // ---------------------------------------------------------------- diagnostics
+
+    fun runDiagnostics() {
+        if (_diagnosticsRunning.value) return
+        _diagnosticsRunning.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _diagnostics.value = app.diagnostics.run()
+            } catch (e: Exception) {
+                _userMessage.value = "Diagnostics failed: ${e.message}"
+            } finally {
+                _diagnosticsRunning.value = false
+            }
+        }
+    }
+
+    /**
+     * Writes the latest diagnostics report and every log line in memory to a shareable file.
+     * Secrets were already redacted when each line was logged.
+     */
+    fun logShareIntent(): Intent? {
+        return try {
+            val dir = File(app.cacheDir, "shared").apply { mkdirs() }
+            dir.listFiles()?.forEach { it.delete() }
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+            val file = File(dir, "runcode-logs-$stamp.txt")
+            file.writeText(buildString {
+                _diagnostics.value?.let { append(it.toText()).append("\n") }
+                append("---- logs ----\n")
+                append(app.logManager.exportLogs().ifEmpty { "(no log lines)\n" })
+            })
+            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", file)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "runcode logs $stamp")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            Intent.createChooser(send, "Share runcode logs")
+        } catch (e: Exception) {
+            _userMessage.value = "Could not prepare logs: ${e.message}"
+            null
+        }
+    }
 
     fun dismissCrashReport() {
         app.clearCrashReport()
