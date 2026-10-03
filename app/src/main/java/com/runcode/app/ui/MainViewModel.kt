@@ -195,16 +195,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             combine(_isDirty, _selectedProject, _activeTab) { dirty, project, tab ->
                 if (dirty && project != null && tab != null) project.id to tab else null
-            }.collect {
-                publishedUnsaved = it
-                app.unsavedEditorFile = it
+            }.collect { marker ->
+                if (marker == null) {
+                    releaseUnsavedMarker()
+                } else {
+                    publishedUnsaved = marker
+                    app.unsavedEditorFile = marker
+                }
             }
         }
     }
 
-    override fun onCleared() {
+    /** Withdraws this view model's marker, never one another activity's view model published since. */
+    private fun releaseUnsavedMarker() {
         if (publishedUnsaved != null && app.unsavedEditorFile === publishedUnsaved) app.unsavedEditorFile = null
+        publishedUnsaved = null
     }
+
+    override fun onCleared() = releaseUnsavedMarker()
 
     // ---------------------------------------------------------------- terminal
 

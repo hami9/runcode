@@ -46,9 +46,13 @@ class GitViewModelTest {
         app.unsavedEditorFile = other
         onCleared.invoke(model)
         assertSame(other, app.unsavedEditorFile)
-
+        // Saving withdraws only this view model's marker, too.
         model.saveCurrentFile()
-        await("saved") { !model.isDirty.value && app.unsavedEditorFile == null }
+        await("saved") { !model.isDirty.value }
+        shadowOf(Looper.getMainLooper()).idle()  // let the collector see the save
+        assertSame(other, app.unsavedEditorFile)
+
+        app.unsavedEditorFile = null  // the other activity saved as well
         model.updateEditorContent("unsaved again")
         await("published again") { app.unsavedEditorFile?.first == project.id }
         onCleared.invoke(model)
