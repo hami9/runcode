@@ -131,6 +131,25 @@ class SshTunnelConnectorTest {
         }
     }
 
+    @Test fun `an interrupt left behind by JSch is cleared, a pending one is kept`() {
+        // What JSch does when the forward's reply arrives before the caller sleeps.
+        assertEquals(7, SshTunnelConnector.withoutStrayInterrupt { Thread.currentThread().interrupt(); 7 })
+        assertFalse(Thread.currentThread().isInterrupted)
+
+        Thread.currentThread().interrupt()
+        SshTunnelConnector.withoutStrayInterrupt { }
+        assertTrue("an interrupt from before the call belongs to the caller", Thread.interrupted())
+    }
+
+    @Test fun `opening never leaves the calling thread interrupted`() {
+        repeat(10) { attempt ->
+            val opened = SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000)
+            val interrupted = Thread.interrupted()
+            opened.connection.close()
+            assertFalse("interrupt flag left set after open #$attempt", interrupted)
+        }
+    }
+
     @Test fun `relay stopping is seen as a dead connection`() {
         val opened = SshTunnelConnector(knownHosts).open(relayProvider(remotePort = 0), bridge.localPort, 10_000)
         assertTrue(shellOpened.await(5, TimeUnit.SECONDS))

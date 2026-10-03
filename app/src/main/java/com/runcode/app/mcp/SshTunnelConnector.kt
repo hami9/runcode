@@ -36,7 +36,7 @@ class SshTunnelConnector(private val knownHosts: File) : TunnelConnector {
             // Keepalives notice a dead socket within about 45 seconds.
             session.setServerAliveInterval(KEEPALIVE_MS)
             session.setServerAliveCountMax(3)
-            session.setPortForwardingR(null, provider.remotePort, "127.0.0.1", localPort)
+            withoutStrayInterrupt { session.setPortForwardingR(null, provider.remotePort, "127.0.0.1", localPort) }
 
             val channel = session.openChannel("shell") as ChannelShell
             channel.setPty(false)
@@ -112,8 +112,23 @@ class SshTunnelConnector(private val knownHosts: File) : TunnelConnector {
         }
     }
 
-    private companion object {
+    internal companion object {
         const val KEEPALIVE_MS = 15_000
         const val MAX_BANNER = 64 * 1024
+
+        /**
+         * JSch wakes the thread waiting for a forward's reply with interrupt(). When the reply
+         * arrives before that thread sleeps, the interrupt is never consumed and the tunnel
+         * thread's next wait throws, ending the tunnel loop. Clear only an interrupt that
+         * [block] left behind; one that was already pending is kept.
+         */
+        fun <T> withoutStrayInterrupt(block: () -> T): T {
+            val pending = Thread.currentThread().isInterrupted
+            try {
+                return block()
+            } finally {
+                if (!pending) Thread.interrupted()
+            }
+        }
     }
 }
