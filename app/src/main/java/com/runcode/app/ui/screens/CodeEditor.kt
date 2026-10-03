@@ -2,6 +2,7 @@ package com.runcode.app.ui.screens
 
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -24,8 +25,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -36,12 +40,14 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runcode.app.ui.theme.AccentCyan
+import com.runcode.app.ui.theme.AccentRed
 import com.runcode.app.ui.theme.DarkSurface
 import com.runcode.app.ui.theme.TextMuted
 import com.runcode.app.ui.theme.TextPrimary
 import kotlinx.coroutines.flow.StateFlow
 
 private val GUTTER_WIDTH = 44.dp
+private val PausedLine = Color(0x40FFB300)
 private val EDITOR_PADDING = 8.dp
 
 /**
@@ -61,7 +67,13 @@ fun CodeEditor(
     documentKey: String,
     content: StateFlow<String>,
     onContentChange: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 1-based lines with a breakpoint, drawn as a dot in the gutter. */
+    breakpoints: Set<Int> = emptySet(),
+    /** 1-based line the debugger is paused on, highlighted; null when not paused here. */
+    pausedLine: Int? = null,
+    /** Tapping a line number; null when breakpoints are not available for this file. */
+    onLineNumberTap: ((Int) -> Unit)? = null
 ) {
     val state = remember(documentKey) { TextFieldState(content.value) }
     val scroll = remember(documentKey) { ScrollState(0) }
@@ -108,6 +120,25 @@ fun CodeEditor(
         }
     }
 
+    val currentLineStarts by rememberUpdatedState(lineStarts)
+    val currentLayout by rememberUpdatedState(layout)
+    val currentOnTap by rememberUpdatedState(onLineNumberTap)
+
+    /** The 1-based logical line at a y position in the gutter, or null below the text. */
+    fun lineAt(y: Float, padding: Float): Int? {
+        val result = currentLayout ?: return null
+        val visual = result.getLineForVerticalPosition(y - padding + scroll.value)
+        val offset = result.getLineStart(visual)
+        val starts = currentLineStarts
+        var low = 0
+        var high = starts.size - 1
+        while (low < high) {
+            val mid = (low + high + 1) / 2
+            if (starts[mid] <= offset) low = mid else high = mid - 1
+        }
+        return low + 1
+    }
+
     val measurer = rememberTextMeasurer(cacheSize = 512)
     val numberStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMuted)
 
@@ -118,6 +149,12 @@ fun CodeEditor(
                 .fillMaxHeight()
                 .background(DarkSurface)
                 .clipToBounds()
+                .pointerInput(Unit) {
+                    detectTapGestures { position ->
+                        val tap = currentOnTap ?: return@detectTapGestures
+                        lineAt(position.y, EDITOR_PADDING.toPx())?.let(tap)
+                    }
+                }
                 .drawBehind {
                     val result = layout ?: return@drawBehind
                     val starts = lineStarts
@@ -139,7 +176,19 @@ fun CodeEditor(
                         for (index in low until starts.size) {
                             val visualLine = result.getLineForOffset(starts[index].coerceAtMost(textLength))
                             if (result.getLineTop(visualLine) + shift > size.height) break
-                            val number = measurer.measure((index + 1).toString(), numberStyle)
+                            val lineNumber = index + 1
+                            val baseline = shift + result.getLineBaseline(visualLine)
+                            if (lineNumber == pausedLine) {
+                                drawRect(
+                                    color = PausedLine,
+                                    topLeft = Offset(0f, shift + result.getLineTop(visualLine)),
+                                    size = Size(size.width, result.getLineBottom(visualLine) - result.getLineTop(visualLine))
+                                )
+                            }
+                            if (lineNumber in breakpoints) {
+                                drawCircle(color = AccentRed, radius = 4.5.dp.toPx(), center = Offset(7.dp.toPx(), baseline - 4.dp.toPx()))
+                            }
+                            val number = measurer.measure(lineNumber.toString(), numberStyle)
                             drawText(
                                 textLayoutResult = number,
                                 topLeft = Offset(
@@ -171,6 +220,15 @@ fun CodeEditor(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
+                .drawBehind {
+                    // The paused line, across the code, under the text.
+                    val line = pausedLine ?: return@drawBehind
+                    val result = layout ?: return@drawBehind
+                    val start = lineStarts.getOrNull(line - 1) ?: return@drawBehind
+                    val visual = result.getLineForOffset(start.coerceAtMost(result.layoutInput.text.length))
+                    val top = EDITOR_PADDING.toPx() - scroll.value + result.getLineTop(visual)
+                    drawRect(PausedLine, Offset(0f, top), Size(size.width, result.getLineBottom(visual) - result.getLineTop(visual)))
+                }
                 .testTag("editor_text_input")
         )
     }

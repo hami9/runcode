@@ -23,6 +23,8 @@ import com.runcode.app.mcp.McpToolHost
 import com.runcode.app.mcp.McpTunnel
 import com.runcode.app.mcp.SshTunnelConnector
 import com.runcode.app.network.PortManager
+import com.runcode.app.runtime.ChaquopyDebugBridge
+import com.runcode.app.runtime.PythonDebugger
 import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.runtime.RuntimeRegistry
 import com.runcode.app.runtime.StaticWebEngine
@@ -76,6 +78,8 @@ class RuncodeApp : Application() {
     lateinit var mcpServer: McpServer
         private set
     lateinit var mcpTunnel: McpTunnel
+        private set
+    lateinit var debugger: PythonDebugger
         private set
 
     /** Host keys of the tunnel relays, trusted on first use. */
@@ -137,7 +141,8 @@ class RuncodeApp : Application() {
         // The embedded CPython has to be started once per process, before any engine uses it.
         isPythonAvailable = PythonEngine.ensureStarted(this)
 
-        val pythonEngine = PythonEngine(this, secretStore, processMonitor)
+        debugger = PythonDebugger(ChaquopyDebugBridge())
+        val pythonEngine = PythonEngine(this, secretStore, processMonitor, debugger)
         val staticWebEngine = StaticWebEngine(portManager, processMonitor)
         runtimeRegistry = RuntimeRegistry(pythonEngine, staticWebEngine)
 
@@ -168,7 +173,8 @@ class RuncodeApp : Application() {
                 onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) },
                 runDiagnostics = { diagnostics.run().toText() },
                 backupProject = ::backupProjectForMcp,
-                git = { git }
+                git = { git },
+                debugger = debugger
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )

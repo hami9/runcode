@@ -5,6 +5,7 @@ import com.runcode.app.database.ProjectDatabaseManager
 import com.runcode.app.domain.models.Project
 import com.runcode.app.git.GitManager
 import com.runcode.app.logging.LogManager
+import com.runcode.app.runtime.PythonDebugger
 import com.runcode.app.storage.ProjectStorage
 import com.runcode.app.settings.ProjectSettingsManager
 import com.runcode.app.supervisor.ServiceSupervisor
@@ -31,7 +32,8 @@ class McpToolHost(
     /** Backs a project up locally, and to the chosen folder when asked. Returns a summary. */
     val backupProject: suspend (project: Project, toFolder: Boolean) -> String,
     /** Lazy, because building it touches the vault and preferences. */
-    val git: () -> GitManager
+    val git: () -> GitManager,
+    val debugger: PythonDebugger
 ) {
     suspend fun projectOrNull(projectId: String): Project? =
         appMetaDatabase.getAllProjects().find { it.id == projectId }

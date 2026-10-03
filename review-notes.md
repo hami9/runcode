@@ -2,8 +2,8 @@
 
 ## v1.5.0 (versionCode 6) — in progress on `ccr-00c06d8d-qqvzlg`
 
-Roadmap phases 3 (diagnostics) and 4 (backups to a chosen folder), plus a public URL for the
-MCP bridge.
+Roadmap phases 3 (diagnostics), 4 (backups to a chosen folder), 5 (git) and 6 (debugger), plus
+a public URL for the MCP bridge.
 
 | Change | Where |
 | --- | --- |
@@ -13,6 +13,8 @@ MCP bridge.
 | **Backup folder** through the Storage Access Framework, export verified by read-back hash, restore from the folder, optional daily run keeping 7 automatic copies. `backup_project` MCP tool. | `backup/`, Backups screen |
 | Backup manifests are built with `JSONObject`; a quote in a project name broke restore. | `BackupManager` |
 | `serverInfo.version` reports the app version instead of `1.0.0`. | `McpServer` |
+| **Git** (phase 5) on dulwich: Git screen, clone into a project, token only sent to GitHub over HTTPS. `git_*` MCP tools. | `git/`, `runcode_git.py` |
+| **Debugger** (phase 6) on bdb: breakpoints in the gutter, step over/into/out, variables, call stack, eval. Debug runs are never auto-restarted. `debug_*` MCP tools. | `runcode_debugger.py`, `runtime/PythonDebugger`, Editor |
 
 Validation in this environment (no Android device or KVM available):
 

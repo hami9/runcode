@@ -26,6 +26,8 @@ import com.runcode.app.mcp.McpServerState
 import com.runcode.app.mcp.McpTunnelState
 import com.runcode.app.mcp.TofuHostKeys
 import com.runcode.app.mcp.TunnelStatus
+import com.runcode.app.runtime.DebugState
+import com.runcode.app.runtime.DebugStatus
 import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.settings.ProjectSettings
 import com.runcode.app.storage.EntryPointEffect
@@ -180,6 +182,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
 
     init {
+        viewModelScope.launch { app.debugger.state.collect { followDebugger(it) } }
         loadProjects()
         refreshCapabilities()
         viewModelScope.launch {
@@ -945,6 +948,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _userMessage.value = "Could not start service. Check console logs."
             }
         }
+    }
+
+    // ---------------------------------------------------------------- debugger
+
+    val debugState: StateFlow<DebugState> = app.debugger.state
+    val breakpoints: StateFlow<Map<String, Map<String, Set<Int>>>> = app.debugger.breakpoints
+
+    private val _debugEvalResult = MutableStateFlow<String?>(null)
+    val debugEvalResult: StateFlow<String?> = _debugEvalResult.asStateFlow()
+
+    /** Breakpoints live on Python files under source/; the key is the path below it. */
+    fun debugFileKey(tab: String?): String? =
+        tab?.takeIf { it.startsWith("source/") && it.endsWith(".py") }?.removePrefix("source/")
+
+    fun toggleBreakpoint(line: Int) {
+        val project = _selectedProject.value ?: return
+        val file = debugFileKey(_activeTab.value) ?: return
+        app.debugger.toggleBreakpoint(project.id, file, line)
+    }
+
+    /** Runs the project under the debugger; it stops at breakpoints in its Python files. */
+    fun debugProject(project: Project) {
+        if (project.profile == ProjectProfile.STATIC_WEB) {
+            _userMessage.value = "Static websites have no Python to debug."
+            return
+        }
+        viewModelScope.launch {
+            if (_isDirty.value && !persistCurrentFile(announce = false)) return@launch
+            _debugEvalResult.value = null
+            app.debugger.arm(project.id)
+            try {
+                if (!app.serviceSupervisor.startProject(project)) {
+                    _userMessage.value = "Could not start the debug run. Stop the running project first."
+                }
+            } finally {
+                app.debugger.disarm(project.id)
+            }
+        }
+    }
+
+    fun debugCommand(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            app.debugger.command(name)?.let { _userMessage.value = it }
+        }
+    }
+
+    fun debugEvaluate(expression: String) {
+        if (expression.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _debugEvalResult.value = app.debugger.evaluate(expression).fold(
+                onSuccess = { "$expression = $it" },
+                onFailure = { "$expression → ${it.message}" }
+            )
+        }
+    }
+
+    fun dismissDebug() = app.debugger.dismiss()
+
+    /** Shows the paused line: opens its file when the debugger stops in another one. */
+    private fun followDebugger(state: DebugState) {
+        if (state.status != DebugStatus.PAUSED) return
+        val project = _selectedProject.value ?: return
+        val file = state.file ?: return
+        if (state.projectId != project.id || file.startsWith("/")) return
+        val tab = "source/$file"
+        if (_activeTab.value != tab) openFile(project.id, tab)
     }
 
     fun stopProject(projectId: String) {

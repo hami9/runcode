@@ -116,10 +116,14 @@ class _Session(bdb.Bdb):
     # -- pausing -------------------------------------------------------------------------
 
     def _pause(self, frame, reason):
+        # Accept commands before announcing the pause: a client that reacts to the published
+        # state at once must not be told the program is still running.
+        with self.cond:
+            self.pending = None
+            self.paused = True
         self._publish(self._snapshot(frame, reason))
         command = None
         with self.cond:
-            self.paused = True
             try:
                 while True:
                     while self.pending is None:

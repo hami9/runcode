@@ -80,6 +80,24 @@ just `source/`, so whatever a script writes into `data/` is visible too.
 
 Binary files and files over 512 KB do not open in the editor; they can still be saved out.
 
+## Debugger
+
+**Editor → bug icon** runs the project's entry point under a Python debugger.
+
+- Tap a line number in a `.py` file under `source/` to set or clear a breakpoint (a red dot).
+  Breakpoints can be changed while the program runs.
+- When execution reaches one, the line is highlighted, the file opens if needed, and the
+  debug panel shows locals, user globals and the call stack.
+- **Continue**, **Over** (next line), **Into** (into a call), **Out** (finish the function) and
+  **Stop**. **Eval** evaluates an expression in the paused frame.
+- Stepping stays in the project's own files; library code runs without stopping.
+
+It is built on `bdb`, the base of `pdb`, and its trace hook exists only during a debug run, so
+normal runs keep their full speed. Only the script's main thread is debugged. Like any Python
+trace hook it acts between lines: a script blocked inside a C call, such as `time.sleep` or a
+socket read, pauses on its next line. A debug run is never restarted automatically, whatever
+the project's restart policy.
+
 ## Git
 
 **Git** works on the selected project's `source/` folder, so `data/`, logs and secrets never
@@ -164,10 +182,14 @@ Authorization: Bearer <token from the System screen>
 Content-Type: application/json
 ```
 
-Twenty-three tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
+Twenty-seven tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
 `create_directory`, `rename_path`, `delete_path`, `set_entry_point`, `start_service`,
 `stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`,
-`run_diagnostics`, `backup_project`, `git_status`, `git_commit`, `git_push`, `git_pull`.
+`run_diagnostics`, `backup_project`, `git_status`, `git_commit`, `git_push`, `git_pull`,
+`debug_start`, `debug_control`, `debug_status`, `debug_eval`.
+
+`debug_start` and `debug_control` wait (up to `wait_ms`) for the program to pause or end, and
+return the state: file, line, call stack and variables.
 
 File changes made over the bridge show up in the app straight away: the file tree refreshes,
 and a file open in the editor reloads unless it has unsaved edits.
@@ -251,6 +273,7 @@ app/src/main/java/com/runcode/app/
 app/src/main/python/
   runcode_runner.py   stdout/stderr bridge, cooperative stop, snippet runner
   runcode_git.py      git on dulwich, JSON in and out, credentials scrubbed
+  runcode_debugger.py debugger on bdb: breakpoints, stepping, eval in the paused frame
 ```
 
 ## Tests

@@ -38,7 +38,7 @@ class McpGitToolsTest {
         val changed = mutableListOf<String>()
         val host = McpToolHost(app.projectStorage, app.appMetaDatabase, app.projectDatabaseManager,
             app.serviceSupervisor, app.logManager, app.terminalSession, { _, _ -> "" },
-            app.projectSettings, { changed += it }, { "" }, { _, _ -> "" }, { git })
+            app.projectSettings, { changed += it }, { "" }, { _, _ -> "" }, { git }, app.debugger)
 
         val project = app.projectStorage.createProjectFromTemplate("MCP git", ProjectProfile.PYTHON_HTTP)
         app.appMetaDatabase.insertOrUpdateProject(project)

@@ -240,6 +240,47 @@ object McpTools {
 
         tools.put(
             tool(
+                "debug_start",
+                "Run a Python project under the debugger. breakpoints is a list of {path, line} with paths " +
+                    "relative to the project root (source/main.py) and 1-based lines; each listed file's breakpoints " +
+                    "replace its previous ones. Waits up to wait_ms (default 10000) for the first pause or the end " +
+                    "and returns the debugger state: file, line, stack, locals, globals.",
+                properties(
+                    "project_id" to stringProp("Project id"),
+                    "breakpoints" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "object")
+                        .put("properties", JSONObject().put("path", stringProp("source/…")).put("line", intProp("1-based line")))),
+                    "wait_ms" to intProp("How long to wait for a pause, up to 60000")
+                ),
+                required = listOf("project_id")
+            )
+        )
+
+        tools.put(
+            tool(
+                "debug_control",
+                "Drive a paused debug run: continue, step (into), next (over), return (out) or stop. Waits up to " +
+                    "wait_ms (default 10000) for the next pause or the end and returns the debugger state.",
+                properties(
+                    "command" to stringProp("continue, step, next, return or stop"),
+                    "wait_ms" to intProp("How long to wait, up to 60000")
+                ),
+                required = listOf("command")
+            )
+        )
+
+        tools.put(tool("debug_status", "The current debugger state: idle, starting, running, paused (with file, line, stack and variables) or finished (with the outcome).", JSONObject()))
+
+        tools.put(
+            tool(
+                "debug_eval",
+                "Evaluate a Python expression in the paused frame and return its type and value.",
+                properties("expression" to stringProp("A Python expression")),
+                required = listOf("expression")
+            )
+        )
+
+        tools.put(
+            tool(
                 "git_status",
                 "Git state of a project's source/ folder: branch, staged/unstaged/untracked files, " +
                     "commits ahead of or behind origin, and the remote URL.",
@@ -329,6 +370,11 @@ object McpTools {
                     args.optString("database").ifBlank { null }
                 )
                 "run_diagnostics" -> textResult(host.runDiagnostics())
+                "debug_start" -> debugStart(host, args)
+                "debug_control" -> debugControl(host, args.getString("command"), waitMs(args))
+                "debug_status" -> textResult(host.debugger.toJson().toString(2))
+                "debug_eval" -> host.debugger.evaluate(args.getString("expression")).fold(
+                    onSuccess = { textResult(it) }, onFailure = { errorResult(it.message ?: "evaluation failed") })
                 "git_status" -> gitStatus(host, args.getString("project_id"))
                 "git_commit" -> gitCommit(host, args.getString("project_id"), args.getString("message"), args.optBoolean("stage_all", true))
                 "git_push" -> gitPush(host, args.getString("project_id"))
@@ -560,6 +606,39 @@ object McpTools {
             )
         }
         return textResult(array.toString(2))
+    }
+
+    private fun waitMs(args: JSONObject) = args.optLong("wait_ms", 10_000L).coerceIn(0L, 60_000L)
+
+    private fun debugStart(host: McpToolHost, args: JSONObject): JSONObject = runBlocking {
+        val project = host.projectOrNull(args.getString("project_id")) ?: return@runBlocking errorResult("Project not found")
+        val debugger = host.debugger
+        args.optJSONArray("breakpoints")?.let { list ->
+            val byFile = mutableMapOf<String, MutableSet<Int>>()
+            for (i in 0 until list.length()) {
+                val entry = list.getJSONObject(i)
+                val path = entry.getString("path").removePrefix("./")
+                require(path.startsWith("source/") && path.endsWith(".py")) { "Breakpoints go on .py files under source/: $path" }
+                byFile.getOrPut(path.removePrefix("source/")) { mutableSetOf() } += entry.getInt("line")
+            }
+            byFile.forEach { (file, lines) -> debugger.setBreakpoints(project.id, file, lines) }
+        }
+        val before = debugger.state.value
+        debugger.arm(project.id)
+        val started = try {
+            host.serviceSupervisor.startProject(project)
+        } finally {
+            debugger.disarm(project.id)
+        }
+        if (!started) return@runBlocking errorResult("Could not start the project. Stop it first if it is running.")
+        textResult(debugger.toJson(debugger.awaitSettled(before, waitMs(args))).toString(2))
+    }
+
+    private fun debugControl(host: McpToolHost, command: String, waitMs: Long): JSONObject = runBlocking {
+        val debugger = host.debugger
+        val before = debugger.state.value
+        debugger.command(command)?.let { return@runBlocking errorResult(it) }
+        textResult(debugger.toJson(debugger.awaitSettled(before, waitMs)).toString(2))
     }
 
     private fun <T> withRepo(host: McpToolHost, projectId: String, block: suspend (Project) -> T): JSONObject = runBlocking {

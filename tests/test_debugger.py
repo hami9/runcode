@@ -187,6 +187,22 @@ class DebuggerTest(unittest.TestCase):
         self.send("continue")
         self.finish(thread)
 
+    def test_a_command_sent_the_moment_a_pause_is_announced_is_accepted(self):
+        # The listener reacts synchronously, the way an eager client would.
+        replies = []
+        session = self.session
+
+        class Eager(Listener):
+            def onState(inner, raw):
+                Listener.onState(inner, raw)
+                if json.loads(raw)["status"] == "paused":
+                    replies.append(json.loads(debugger.command(session, "continue")))
+
+        self.listener = Eager()
+        thread = self.start({self.script: [6]})
+        self.assertEqual("completed", self.finish(thread)["outcome"])
+        self.assertEqual([{"ok": True}], replies)
+
     def test_commands_are_refused_while_running(self):
         self.assertFalse(json.loads(debugger.command("nobody", "continue"))["ok"])
         self.assertFalse(json.loads(debugger.command(self.session, "jump"))["ok"])

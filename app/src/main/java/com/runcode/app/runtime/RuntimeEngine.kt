@@ -73,6 +73,13 @@ interface RuntimeHandle {
      * Null when the runtime has no single thread to point at.
      */
     val threadId: Long?
+
+    /**
+     * False for runs a person is driving, such as a debug run: restarting one would run the
+     * project again without its debugger, so the supervisor leaves it stopped.
+     */
+    val restartable: Boolean get() = true
+
     suspend fun stop()
     suspend fun forceKill()
     suspend fun checkHealth(): RuntimeHealth
