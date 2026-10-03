@@ -65,6 +65,11 @@ fun GitScreen(viewModel: MainViewModel) {
     var dialog by remember { mutableStateOf<GitDialog?>(null) }
 
     LaunchedEffect(project?.id) { viewModel.refreshGit() }
+    // A refresh asked for while another project's task runs is dropped, so try again once it
+    // ends; otherwise the screen would keep showing the previous project's repository.
+    LaunchedEffect(state.busy) {
+        if (state.busy == null && state.projectId != project?.id) viewModel.refreshGit()
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),

@@ -78,10 +78,16 @@ class GitManager(
         else if (!vault.setSecret(TOKEN_KEY, trimmed)) throw GitException("The token could not be stored in the vault.")
     }
 
-    private fun token(): String = vault.getSecret(TOKEN_KEY)?.also { SecretRedactor.register(it) } ?: ""
-
-    /** GitHub accepts any user name with a token; this is the one its docs use. */
-    private fun username(): String = if (hasToken) TOKEN_USER else ""
+    /**
+     * Username and token for [url], or empty ones. The token is a GitHub token, so it only
+     * goes to GitHub over HTTPS: a mistyped or hostile remote, or plain HTTP, never sees it.
+     */
+    private fun credentialsFor(url: String?): Pair<String, String> {
+        if (url == null || !sendsToken(url)) return "" to ""
+        val token = vault.getSecret(TOKEN_KEY)?.also { SecretRedactor.register(it) } ?: return "" to ""
+        // GitHub accepts any user name with a token; this is the one its docs use.
+        return TOKEN_USER to token
+    }
 
     // ---------------------------------------------------------------- local
 
@@ -140,13 +146,15 @@ class GitManager(
 
     suspend fun push(project: Project) = run {
         val branch = currentBranch(project)
-        call("push", repoDir(project).path, branch, username(), token())
+        val (user, token) = credentialsFor(remoteOf(project))
+        call("push", repoDir(project).path, branch, user, token)
     }
 
     /** Fast-forward only. Returns the number of new commits. */
     suspend fun pull(project: Project): Int = run {
         val branch = currentBranch(project)
-        call("pull", repoDir(project).path, branch, username(), token()).getInt("new_commits")
+        val (user, token) = credentialsFor(remoteOf(project))
+        call("pull", repoDir(project).path, branch, user, token).getInt("new_commits")
     }
 
     /**
@@ -161,7 +169,8 @@ class GitManager(
         try {
             // dulwich creates the folder itself and refuses an existing one.
             source.deleteRecursively()
-            call("clone", url.trim(), source.path, username(), token())
+            val (user, token) = credentialsFor(url.trim())
+            call("clone", url.trim(), source.path, user, token)
             archive.projectForSource(id, name, "Cloned from ${url.trim()}")
         } catch (e: Exception) {
             storage.deleteProject(id)
@@ -170,6 +179,9 @@ class GitManager(
     }
 
     // ---------------------------------------------------------------- plumbing
+
+    private fun remoteOf(project: Project): String? =
+        call("status", repoDir(project).path).optStringOrNull("remote")
 
     private fun currentBranch(project: Project): String {
         val r = call("branches", repoDir(project).path)
@@ -194,5 +206,14 @@ class GitManager(
         private const val KEY_NAME = "author_name"
         private const val KEY_EMAIL = "author_email"
         private val BRANCH_NAME = Regex("[A-Za-z0-9._/-]+")
+        private val TOKEN_HOSTS = setOf("github.com")
+
+        /** Whether [url] is an HTTPS URL on a host the GitHub token belongs to. */
+        fun sendsToken(url: String): Boolean {
+            val uri = runCatching { java.net.URI(url.trim()) }.getOrNull() ?: return false
+            return uri.scheme.equals("https", ignoreCase = true) &&
+                uri.userInfo == null &&
+                uri.host?.lowercase() in TOKEN_HOSTS
+        }
     }
 }

@@ -167,3 +167,60 @@ class GitManagerTest {
         assertTrue(runCatching { git.checkout(project, "bad name; rm -rf", true) }.exceptionOrNull() is IllegalArgumentException)
     }
 }
+
+/** Records what reaches the backend, to check which calls carry the token. */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [28], application = Application::class)
+class GitCredentialsTest {
+
+    private val calls = mutableListOf<Pair<String, List<Any>>>()
+    private var remote: String? = null
+    private lateinit var git: GitManager
+    private lateinit var storage: ProjectStorage
+    private val token = "ghp_onlyforgithub123456"
+
+    @Before fun setup() {
+        val app = RuntimeEnvironment.getApplication()
+        storage = ProjectStorage(app)
+        val backend = GitBackend { function, args ->
+            calls += function to args.toList()
+            when (function) {
+                "status" -> JSONObject().put("ok", true).put("remote", remote ?: JSONObject.NULL).toString()
+                "branches" -> JSONObject().put("ok", true).put("current", "main").put("branches", JSONArray()).toString()
+                "pull" -> JSONObject().put("ok", true).put("new_commits", 0).toString()
+                else -> JSONObject().put("ok", true).toString()
+            }
+        }
+        git = GitManager(backend, storage, ProjectArchive(app, storage), MapVault(),
+            app.getSharedPreferences("git-cred-${System.nanoTime()}", Context.MODE_PRIVATE))
+        git.setToken(token)
+    }
+
+    private fun sentToken(function: String) = calls.last { it.first == function }.second.contains(token)
+
+    @Test fun `token goes only to https github`() = runBlocking {
+        val project = storage.createProjectFromTemplate("Creds", ProjectProfile.PYTHON_SCRIPT)
+        for ((url, expected) in listOf(
+            "https://github.com/a/b.git" to true,
+            "https://GitHub.com/a/b" to true,
+            "http://github.com/a/b.git" to false,
+            "https://gitlab.com/a/b.git" to false,
+            "https://github.com.evil.example/a/b.git" to false,
+            "https://user@github.com/a/b.git" to false,
+            "/local/path/repo.git" to false
+        )) {
+            remote = url
+            git.push(project)
+            assertEquals("push to $url", expected, sentToken("push"))
+            git.pull(project)
+            assertEquals("pull from $url", expected, sentToken("pull"))
+        }
+    }
+
+    @Test fun `clone sends the token only for github over https`() = runBlocking {
+        runCatching { git.cloneProject("https://github.com/a/b.git") }
+        assertTrue(sentToken("clone"))
+        runCatching { git.cloneProject("http://example.com/a/b.git") }
+        assertFalse(sentToken("clone"))
+    }
+}

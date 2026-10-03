@@ -96,7 +96,8 @@ the app, because a native git binary cannot be shipped or executed on Android.
 - **Settings** holds the author name and email (GitHub matches commits to accounts by email)
   and a GitHub token. Use a fine-grained token with *Contents: read and write*. It is kept in
   the Keystore-backed vault, never shown again, scrubbed from errors and never written into the
-  repository's config.
+  repository's config. It is only sent to `https://github.com`; other remotes, and GitHub over
+  plain HTTP, get no credentials.
 
 Git operations that rewrite files refuse while the editor has unsaved changes. SSH remotes
 are not supported; use HTTPS URLs.
