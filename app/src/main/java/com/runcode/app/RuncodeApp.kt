@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.security.SecureRandom
 
@@ -117,6 +119,13 @@ class RuncodeApp : Application() {
     var isPythonAvailable: Boolean = false
         private set
 
+    /**
+     * The project id and path of the file the editor holds unsaved changes to, kept current by
+     * the view model, so the MCP bridge can refuse to rewrite files under those changes.
+     */
+    @Volatile
+    var unsavedEditorFile: Pair<String, String>? = null
+
     override fun onCreate() {
         super.onCreate()
 
@@ -174,7 +183,8 @@ class RuncodeApp : Application() {
                 runDiagnostics = { diagnostics.run().toText() },
                 backupProject = ::backupProjectForMcp,
                 git = { git },
-                debugger = debugger
+                debugger = debugger,
+                unsavedEditorFile = { projectId -> unsavedEditorFile?.takeIf { it.first == projectId }?.second }
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )
@@ -226,10 +236,14 @@ class RuncodeApp : Application() {
         return "Created a local backup and copied it to ${backupFolder.state.value.label} as ${stored.name}; the copy was read back and verified."
     }
 
+    private val autoBackupLock = Mutex()
+
     /** Backs every project up to the chosen folder when the daily run is switched on and due. */
-    suspend fun runAutoBackupIfDue() {
+    suspend fun runAutoBackupIfDue() = autoBackupLock.withLock {
+        // Checked under the lock: the hourly loop and the Backups switch can both find a run
+        // due, and only the first may do it.
         val now = System.currentTimeMillis()
-        if (!backupFolder.isAutoDue(now)) return
+        if (!backupFolder.isAutoDue(now)) return@withLock
         // Never throws: it runs in an endless loop and from the UI, and one failure must not
         // end daily backups or crash the app.
         val result = try {

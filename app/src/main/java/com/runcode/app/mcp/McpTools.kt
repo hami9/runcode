@@ -683,6 +683,10 @@ object McpTools {
     }
 
     private fun gitPull(host: McpToolHost, projectId: String) = withRepo(host, projectId) { project ->
+        // The same rule as the Git screen: saving those edits later would undo the pull.
+        host.unsavedEditorFile(project.id)?.let { file ->
+            return@withRepo errorResult("$file has unsaved changes in the app's editor. Save or discard them there, then pull again.")
+        }
         val count = host.git().pull(project)
         host.onProjectChanged(project.id)
         if (count == 0) "Already up to date" else "Pulled $count new commit(s)"

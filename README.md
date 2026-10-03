@@ -89,7 +89,8 @@ Binary files and files over 512 KB do not open in the editor; they can still be 
 - When execution reaches one, the line is highlighted, the file opens if needed, and the
   debug panel shows locals, user globals and the call stack.
 - **Continue**, **Over** (next line), **Into** (into a call), **Out** (finish the function) and
-  **Stop**. **Eval** evaluates an expression in the paused frame.
+  **Stop**. **Eval** evaluates an expression in the paused frame. An expression still running
+  after 10 seconds, or when Stop is pressed, is interrupted.
 - Stepping stays in the project's own files; library code runs without stopping.
 
 It is built on `bdb`, the base of `pdb`, and its trace hook exists only during a debug run, so

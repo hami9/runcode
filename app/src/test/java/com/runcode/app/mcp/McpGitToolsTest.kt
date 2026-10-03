@@ -36,9 +36,11 @@ class McpGitToolsTest {
             app.getSharedPreferences("mcp-git-test", Context.MODE_PRIVATE))
         git.identity = GitIdentity("Bridge Bot", "bot@example.com")
         val changed = mutableListOf<String>()
+        var unsaved: String? = null
         val host = McpToolHost(app.projectStorage, app.appMetaDatabase, app.projectDatabaseManager,
             app.serviceSupervisor, app.logManager, app.terminalSession, { _, _ -> "" },
-            app.projectSettings, { changed += it }, { "" }, { _, _ -> "" }, { git }, app.debugger)
+            app.projectSettings, { changed += it }, { "" }, { _, _ -> "" }, { git }, app.debugger,
+            unsavedEditorFile = { unsaved })
 
         val project = app.projectStorage.createProjectFromTemplate("MCP git", ProjectProfile.PYTHON_HTTP)
         app.appMetaDatabase.insertOrUpdateProject(project)
@@ -68,6 +70,15 @@ class McpGitToolsTest {
         git.setRemote(project, remote.path)
         val pushed = call("git_push", JSONObject())
         assertFalse(text(pushed), pushed.getBoolean("isError"))
+
+        // Unsaved edits in the app's editor would undo a pull once saved: refused.
+        unsaved = "main.py"
+        val refused = call("git_pull", JSONObject())
+        assertTrue(refused.getBoolean("isError"))
+        assertTrue(text(refused), text(refused).startsWith("main.py has unsaved changes"))
+        assertEquals("a refused pull changes nothing", listOf(project.id), changed)
+
+        unsaved = null
         assertEquals("Already up to date", text(call("git_pull", JSONObject())))
     }
 }

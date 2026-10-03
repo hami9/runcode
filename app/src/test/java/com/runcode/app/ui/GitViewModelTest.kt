@@ -61,10 +61,13 @@ class GitViewModelTest {
         model.updateEditorContent("unsaved change")
         model.gitPull()
         assertEquals("Save the file open in the editor first.", model.git.value.error)
+        // The MCP bridge sees the same unsaved file, so its git_pull refuses too.
+        await("unsaved file published") { app.unsavedEditorFile == project.id to model.activeTab.value }
 
         // A failing operation surfaces its reason and leaves the screen usable.
         model.saveCurrentFile()
         await("save") { !model.isDirty.value }
+        await("unsaved file cleared") { app.unsavedEditorFile == null }
         model.gitPush()
         await("push error") { model.git.value.busy == null && model.git.value.error != null }
         assertTrue(model.git.value.error!!.contains("remote"))

@@ -8,7 +8,8 @@ Flow: debug_script() runs the project through runcode_runner.run_script with an 
 wraps runpy in Bdb.runcall. When execution reaches a breakpoint or finishes a step, the script
 thread publishes its state to the Kotlin listener and waits for a command from command(), which
 the app calls from another thread. Evaluation runs on the paused thread itself, so expressions
-see the real frame.
+see the real frame. An expression that runs past the timeout, or a stop sent meanwhile,
+interrupts it with an async exception, the same way the supervisor stops a script.
 
 Only the script's main thread is traced, and only files under the project root are stepped
 into or stopped in; library code runs at full speed. Like any trace hook it acts between Python
@@ -18,6 +19,7 @@ All public functions return JSON strings.
 """
 
 import bdb
+import collections
 import json
 import os
 import reprlib
@@ -57,6 +59,17 @@ def _show(value):
         return "<repr failed: %s>" % error.__class__.__name__
 
 
+class _EvalCancelled(BaseException):
+    """Raised in the paused thread to abandon an expression that is still running."""
+
+
+class _EvalRequest:
+    def __init__(self, expression):
+        self.expression = expression
+        self.result = None       # JSON reply, set once
+        self.abandoned = False   # the caller stopped waiting
+
+
 def _variables(namespace, globals_only=False):
     shown = []
     for name, value in namespace.items():
@@ -79,8 +92,9 @@ class _Session(bdb.Bdb):
         self.root = os.path.abspath(root) + os.sep
         self.listener = listener
         self.cond = threading.Condition()
-        self.pending = None          # (command, argument) waiting for the paused thread
-        self.eval_results = {}       # request id -> JSON reply
+        self.requests = collections.deque()  # ("eval", _EvalRequest) or (command, None)
+        self.evaluating = None       # the _EvalRequest the paused thread is running
+        self.thread_ident = None     # the script thread, for interrupting an expression
         self.paused = False
         self.stopped_by_user = False
         self.state = {"status": "starting"}
@@ -119,25 +133,20 @@ class _Session(bdb.Bdb):
         # Accept commands before announcing the pause: a client that reacts to the published
         # state at once must not be told the program is still running.
         with self.cond:
-            self.pending = None
+            self.requests.clear()
+            self.thread_ident = threading.get_ident()
             self.paused = True
         self._publish(self._snapshot(frame, reason))
-        command = None
-        with self.cond:
-            try:
-                while True:
-                    while self.pending is None:
-                        # Short waits, so the async stop exception from the supervisor lands.
-                        self.cond.wait(0.1)
-                    command, argument = self.pending
-                    self.pending = None
-                    if command != "eval":
-                        break
-                    request_id, expression = argument
-                    self.eval_results[request_id] = self._evaluate(frame, expression)
-                    self.cond.notify_all()
-            finally:
+        try:
+            command = self._serve(frame)
+        finally:
+            with self.cond:
                 self.paused = False
+                for kind, request in self.requests:
+                    if kind == "eval":
+                        request.result = _fail("The program resumed before the expression ran.")
+                self.requests.clear()
+                self.cond.notify_all()
 
         if command == "continue":
             self.set_continue()
@@ -151,6 +160,48 @@ class _Session(bdb.Bdb):
             self.stopped_by_user = True
             self.set_quit()
         self._publish({"status": "running"})
+
+    def _serve(self, frame):
+        """Runs expressions until a command arrives, and returns that command."""
+        while True:
+            # The lock is never held while an expression runs, so a caller's timeout and a
+            # stop command still work while one is slow.
+            try:
+                with self.cond:
+                    while not self.requests:
+                        # Short waits, so the async stop exception from the supervisor lands.
+                        self.cond.wait(0.1)
+                    kind, request = self.requests.popleft()
+                    if kind != "eval":
+                        return kind
+                    if request.abandoned:
+                        continue
+                    self.evaluating = request
+                result = self._evaluate(frame, request.expression)
+                with self.cond:
+                    self.evaluating = None
+                    request.result = result
+                    self.cond.notify_all()
+            except _EvalCancelled:
+                # Only ever raised while an expression runs, and caught here even when it
+                # lands just after the expression returned.
+                with self.cond:
+                    if self.evaluating is not None:
+                        self.evaluating.result = _fail("The expression was interrupted.")
+                        self.evaluating = None
+                    self.cond.notify_all()
+
+    def _interrupt_evaluation(self):
+        """Call with self.cond held, while self.evaluating is set."""
+        set_async_exc, ctypes = runcode_runner._set_async_exc, runcode_runner.ctypes
+        if set_async_exc is None or self.thread_ident is None:
+            return False
+        ident = ctypes.c_ulong(self.thread_ident)
+        affected = set_async_exc(ident, ctypes.py_object(_EvalCancelled))
+        if affected > 1:
+            set_async_exc(ident, None)
+            return False
+        return affected == 1
 
     def _evaluate(self, frame, expression):
         try:
@@ -199,24 +250,34 @@ class _Session(bdb.Bdb):
 
     # -- commands from other threads -----------------------------------------------------
 
-    def send(self, command, argument=None):
+    def send(self, command):
         with self.cond:
             if not self.paused:
                 return _fail("The program is running, not paused.")
-            self.pending = (command, argument)
+            if any(kind != "eval" for kind, _ in self.requests):
+                return _fail("Another command is already waiting to run.")
+            self.requests.append((command, None))
+            if command == "stop" and self.evaluating is not None:
+                # Do not make a stop wait for a slow expression.
+                self._interrupt_evaluation()
             self.cond.notify_all()
         return _ok()
 
     def evaluate(self, expression):
-        request_id = object()
+        request = _EvalRequest(expression)
+        timeout = _EVAL_TIMEOUT_S
         with self.cond:
             if not self.paused:
                 return _fail("Pause the program to evaluate expressions.")
-            self.pending = ("eval", (request_id, expression))
+            self.requests.append(("eval", request))
             self.cond.notify_all()
-            if not self.cond.wait_for(lambda: request_id in self.eval_results, _EVAL_TIMEOUT_S):
-                return _fail("The expression did not finish within %d seconds." % _EVAL_TIMEOUT_S)
-            return self.eval_results.pop(request_id)
+            if self.cond.wait_for(lambda: request.result is not None, timeout):
+                return request.result
+            # Late results are dropped with the request; a queued one is skipped.
+            request.abandoned = True
+            interrupted = self.evaluating is request and self._interrupt_evaluation()
+        return _fail("The expression did not finish within %g seconds%s." % (
+            timeout, " and was interrupted" if interrupted else ""))
 
     def run(self, script_path):
         # Bdb.runcall starts in single-step mode and would stop on line 1. Start "continue"

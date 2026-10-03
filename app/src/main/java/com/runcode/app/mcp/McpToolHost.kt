@@ -33,7 +33,9 @@ class McpToolHost(
     val backupProject: suspend (project: Project, toFolder: Boolean) -> String,
     /** Lazy, because building it touches the vault and preferences. */
     val git: () -> GitManager,
-    val debugger: PythonDebugger
+    val debugger: PythonDebugger,
+    /** The file of [projectId] open in the app's editor with unsaved changes, if any. */
+    val unsavedEditorFile: (projectId: String) -> String? = { null }
 ) {
     suspend fun projectOrNull(projectId: String): Project? =
         appMetaDatabase.getAllProjects().find { it.id == projectId }

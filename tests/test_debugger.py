@@ -187,6 +187,71 @@ class DebuggerTest(unittest.TestCase):
         self.send("continue")
         self.finish(thread)
 
+    def test_a_slow_expression_times_out_and_is_interrupted(self):
+        thread = self.start({self.helper: [3]})
+        self.listener.paused()
+        original = debugger._EVAL_TIMEOUT_S
+        debugger._EVAL_TIMEOUT_S = 0.5
+        try:
+            started = time.monotonic()
+            reply = json.loads(debugger.evaluate(self.session, "sum(1 for _ in iter(int, 1))"))
+            self.assertLess(time.monotonic() - started, 3, "the timeout must not wait for the expression")
+        finally:
+            debugger._EVAL_TIMEOUT_S = original
+        self.assertFalse(reply["ok"])
+        self.assertIn("interrupted", reply["error"])
+        # The paused frame is still usable afterwards.
+        self.assertEqual("int", json.loads(debugger.evaluate(self.session, "y"))["type"])
+        for _ in range(2):
+            self.listener.paused(after=self.send("continue"))
+        self.send("continue")
+        self.assertEqual("completed", self.finish(thread)["outcome"])
+
+    def test_stop_interrupts_a_running_expression(self):
+        thread = self.start({self.script: [3]})
+        self.listener.paused()
+        replies = []
+        evaluating = threading.Thread(target=lambda: replies.append(json.loads(
+            debugger.evaluate(self.session, "sum(1 for _ in iter(int, 1))"))), daemon=True)
+        evaluating.start()
+        time.sleep(0.3)
+        started = time.monotonic()
+        self.send("stop")
+        self.assertEqual("stopped", self.finish(thread)["outcome"])
+        self.assertLess(time.monotonic() - started, 3)
+        evaluating.join(5)
+        self.assertFalse(replies[0]["ok"])
+
+    def test_concurrent_evaluations_each_get_their_own_result(self):
+        thread = self.start({self.helper: [3]})
+        self.listener.paused()
+        results = {}
+
+        def run(n):
+            results[n] = json.loads(debugger.evaluate(self.session, "x * 100 + %d" % n))
+
+        workers = [threading.Thread(target=run, args=(n,)) for n in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+        self.assertEqual({n: str(n) for n in range(8)}, {n: r["value"] for n, r in results.items()})
+        self.assertFalse(json.loads(debugger.command(self.session, "jump"))["ok"])
+        for _ in range(2):
+            self.listener.paused(after=self.send("continue"))
+        self.send("continue")
+        self.finish(thread)
+
+    def test_a_second_command_is_refused_until_the_first_runs(self):
+        thread = self.start({self.script: [3]})
+        self.listener.paused()
+        session = debugger._sessions[self.session]
+        with session.cond:
+            # Hold the lock so the paused thread cannot take the first command yet.
+            self.assertTrue(json.loads(session.send("continue"))["ok"])
+            self.assertFalse(json.loads(session.send("step"))["ok"])
+        self.assertEqual("completed", self.finish(thread)["outcome"])
+
     def test_a_command_sent_the_moment_a_pause_is_announced_is_accepted(self):
         # The listener reacts synchronously, the way an eager client would.
         replies = []

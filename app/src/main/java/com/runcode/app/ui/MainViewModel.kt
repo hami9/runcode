@@ -40,6 +40,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -188,6 +189,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             app.projectChanges.collect { projectId -> onExternalProjectChange(projectId) }
         }
+        viewModelScope.launch {
+            combine(_isDirty, _selectedProject, _activeTab) { dirty, project, tab ->
+                if (dirty && project != null && tab != null) project.id to tab else null
+            }.collect { app.unsavedEditorFile = it }
+        }
+    }
+
+    override fun onCleared() {
+        app.unsavedEditorFile = null
     }
 
     // ---------------------------------------------------------------- terminal
