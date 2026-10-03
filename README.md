@@ -80,6 +80,80 @@ just `source/`, so whatever a script writes into `data/` is visible too.
 
 Binary files and files over 512 KB do not open in the editor; they can still be saved out.
 
+## Debugger
+
+**Editor → bug icon** runs the project's entry point under a Python debugger.
+
+- Tap a line number in a `.py` file under `source/` to set or clear a breakpoint (a red dot).
+  Breakpoints can be changed while the program runs.
+- When execution reaches one, the line is highlighted, the file opens if needed, and the
+  debug panel shows locals, user globals and the call stack.
+- **Continue**, **Over** (next line), **Into** (into a call), **Out** (finish the function) and
+  **Stop**. **Eval** evaluates an expression in the paused frame. An expression still running
+  after 10 seconds, or when Stop is pressed, is interrupted.
+- Stepping stays in the project's own files; library code runs without stopping.
+
+It is built on `bdb`, the base of `pdb`, and its trace hook exists only during a debug run, so
+normal runs keep their full speed. Only the script's main thread is debugged. Like any Python
+trace hook it acts between lines: a script blocked inside a C call, such as `time.sleep` or a
+socket read, pauses on its next line. A debug run is never restarted automatically, whatever
+the project's restart policy.
+
+## Git
+
+**Git** works on the selected project's `source/` folder, so `data/`, logs and secrets never
+end up in commits. It runs on [dulwich](https://www.dulwich.io), a pure-Python git bundled with
+the app, because a native git binary cannot be shipped or executed on Android.
+
+- **Initialise repository** creates one on `main` with a `.gitignore` for Python caches.
+- The screen lists staged, changed and new files; commit with or without staging everything
+  first, and see the last 30 commits.
+- **Branch** switches or creates branches. Switching refuses to overwrite uncommitted changes.
+- **Remote**, **Push** and **Pull** work against GitHub or any smart-HTTP git server. Pull only
+  fast-forwards: when histories have diverged it says so instead of merging.
+- **Clone** creates a new project from a URL, with the entry point detected as for a zip.
+- **Settings** holds the author name and email (GitHub matches commits to accounts by email)
+  and a GitHub token. Use a fine-grained token with *Contents: read and write*. It is kept in
+  the Keystore-backed vault, never shown again, scrubbed from errors and never written into the
+  repository's config. It is only sent to `https://github.com`; other remotes, and GitHub over
+  plain HTTP, get no credentials.
+
+Git operations that rewrite files refuse while the editor has unsaved changes. SSH remotes
+are not supported; use HTTPS URLs.
+
+## Backups
+
+**Backups** creates checksummed archives of a project's `source/` and `data/`. Secrets, logs
+and caches are never included, and the checksum is verified before every restore.
+
+**Choose folder** keeps backups outside the app as well. The system folder picker accepts
+device storage, a memory card, or a cloud app that offers folders, such as Google Drive or
+OneDrive, with no account or API key in runcode. **Back up to folder** writes a fresh backup,
+reads the copy back and compares its SHA-256; a copy that does not match is removed. Backups
+already in the folder can be verified and restored from the same screen, including on another
+device.
+
+**Daily automatic backup** is off by default. When on, it backs up every project once a day
+while runcode is running, keeps the last 7 automatic copies per project and never deletes
+manual ones.
+
+## Diagnostics
+
+**System → Diagnostics → Run** checks the device and the network and produces a report to copy
+or share:
+
+- App: Android version and ABI, free storage and memory, notification permission, battery
+  optimisation, the Python interpreter, whether the foreground service really holds running
+  work, and the last crash.
+- Network: connection type and validation, VPN, LAN address, reserved ports, DNS, HTTPS, and
+  whether the Telegram API is reachable (bots need it; some networks block it).
+- Services: whether each running static site or Python HTTP API accepts connections on its
+  port. Other project types do not listen on a port and are not judged by one.
+- MCP bridge: a `GET /health` self-test, and the public tunnel's state.
+
+**Share logs** sends the latest report and every log line through the share sheet. Secrets
+were already redacted when each line was logged.
+
 ## Project settings
 
 Open **Projects → settings icon** to edit the port, restart policy, start on boot, CPU/heap/idle
@@ -109,9 +183,14 @@ Authorization: Bearer <token from the System screen>
 Content-Type: application/json
 ```
 
-Seventeen tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
+Twenty-seven tools: `list_projects`, `get_project`, `update_project_settings`, `list_files`, `read_file`, `write_file`,
 `create_directory`, `rename_path`, `delete_path`, `set_entry_point`, `start_service`,
-`stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`.
+`stop_service`, `service_status`, `get_logs`, `run_command`, `run_python`, `sql_query`,
+`run_diagnostics`, `backup_project`, `git_status`, `git_commit`, `git_push`, `git_pull`,
+`debug_start`, `debug_control`, `debug_status`, `debug_eval`.
+
+`debug_start` and `debug_control` wait (up to `wait_ms`) for the program to pause or end, and
+return the state: file, line, call stack and variables.
 
 File changes made over the bridge show up in the app straight away: the file tree refreshes,
 and a file open in the editor reloads unless it has unsaved edits.
@@ -137,6 +216,27 @@ curl -s -X POST http://127.0.0.1:8765/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
+### Connecting from anywhere
+
+Turn on **Public URL (internet)** under the bridge. The app opens an outbound SSH reverse
+tunnel and shows an `https://…/mcp` endpoint with a **Copy** button. No port forwarding,
+public IP or extra app is needed, and it works behind carrier NAT and with a VPN on: the
+connection starts on the phone, so Android sends it through the VPN like any other traffic.
+
+- The relay is [Pinggy](https://pinggy.io) over SSH on port 443, with
+  [localhost.run](https://localhost.run) on port 22 as a fallback.
+- A dropped tunnel reconnects with backoff (2 s up to 30 s). Switching between Wi-Fi and
+  mobile data, or a VPN reconnecting, reconnects it straight away.
+- Free relays hand out a new URL on every connection and Pinggy's free tunnels last 60
+  minutes, so copy the endpoint again after a reconnect.
+- If it keeps retrying with a VPN on, check that runcode is not excluded from the VPN
+  (split tunneling).
+
+```bash
+claude mcp add --transport http runcode https://<id>.run.pinggy-free.link/mcp \
+  --header "Authorization: Bearer $RUNCODE_TOKEN"
+```
+
 ### Security
 
 The bridge exposes a shell, arbitrary Python and read/write file access on the device.
@@ -146,6 +246,9 @@ The bridge exposes a shell, arbitrary Python and read/write file access on the d
 - The listener binds `127.0.0.1` unless you turn on **Expose on local network**, which makes
   anyone on the same Wi-Fi with the token able to run commands on the device. Prefer
   `adb forward` or a tunnel.
+- **Public URL** makes the bridge reachable from the whole internet for anyone with both the
+  URL and the token. The relay terminates HTTPS, so it can read requests, including the
+  token. Turn it off when you are done and rotate the token after sharing it.
 - Secret-valued environment variables are returned as `<secret>`, never echoed back.
 - Registered vault values are redacted from logs and text tool results. This is not an
   isolation boundary: MCP's arbitrary code tools and project scripts run with app privileges.
@@ -159,25 +262,36 @@ The bridge exposes a shell, arbitrary Python and read/write file access on the d
 app/src/main/java/com/runcode/app/
   runtime/     PythonEngine (Chaquopy), StaticWebEngine, engine contracts
   supervisor/  ServiceSupervisor — lifecycle, restart policy, ports, wake lock
+  git/         GitManager over runcode_git.py (dulwich); token in the vault
+  backup/      Checksummed archives, backups to a user-chosen folder (SAF), daily runs
+  diagnostics/ Device and network checks behind the System screen and run_diagnostics
   terminal/    TerminalSession — interactive sh plus one-shot command runner
-  mcp/         McpServer (JSON-RPC over HTTP), McpTools, McpToolHost
+  mcp/         McpServer (JSON-RPC over HTTP), McpTools, McpToolHost, McpTunnel (public URL)
   storage/     Path-checked project files, zip import/export, entry-point tracking
   database/    App metadata DB and the project SQLite browser
   security/    Keystore-backed secret vault, log redaction
   ui/          Compose screens
 app/src/main/python/
   runcode_runner.py   stdout/stderr bridge, cooperative stop, snippet runner
+  runcode_git.py      git on dulwich, JSON in and out, credentials scrubbed
+  runcode_debugger.py debugger on bdb: breakpoints, stepping, eval in the paused frame
 ```
 
 ## Tests
 
 ```bash
+python -m pip install dulwich==1.2.15
 python -m unittest discover -s tests -v
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
+Git tests in both suites run the real `runcode_git.py`. The Kotlin ones use the Python named by
+`RUNCODE_TEST_PYTHON` or `RUNCODE_BUILD_PYTHON`, or `python3`, and are skipped when none of
+them can import dulwich.
+
 The JVM tests cover settings validation, vault rollback, secret handling, archive paths,
-editor ownership and supervisor restarts. Robolectric tests use API 28; device testing is
+editor ownership, supervisor restarts, diagnostics rules and probes, folder backups through a
+real `DocumentsProvider`, and the public tunnel against an in-process SSH server. Robolectric tests use API 28; device testing is
 still needed for Keystore, Compose interaction and foreground-service behavior on API 36.
 
 ## License

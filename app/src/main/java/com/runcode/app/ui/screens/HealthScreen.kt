@@ -60,7 +60,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.runcode.app.diagnostics.CheckStatus
+import com.runcode.app.diagnostics.DiagnosticCheck
 import com.runcode.app.mcp.McpTools
+import com.runcode.app.mcp.TunnelStatus
 import com.runcode.app.ui.MainViewModel
 import com.runcode.app.ui.theme.AccentCyan
 import com.runcode.app.ui.theme.AccentGreen
@@ -206,6 +209,10 @@ fun HealthScreen(
             CrashReportCard(viewModel)
         }
 
+        item {
+            DiagnosticsCard(viewModel)
+        }
+
         // MCP Bridge
         item {
             McpBridgeCard(viewModel)
@@ -329,6 +336,95 @@ private fun CrashReportCard(viewModel: MainViewModel) {
     }
 }
 
+/** Runs every check on demand and turns the result into something a user can paste. */
+@Composable
+private fun DiagnosticsCard(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    val report by viewModel.diagnostics.collectAsState()
+    val running by viewModel.diagnosticsRunning.collectAsState()
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Diagnostics", fontWeight = FontWeight.Bold, color = AccentCyan, fontSize = 14.sp)
+            Text(
+                text = report?.summary ?: "Checks settings, storage, Python, network, service ports and the MCP bridge.",
+                fontSize = 11.sp,
+                color = TextSecondary
+            )
+
+            report?.let { current ->
+                Spacer(modifier = Modifier.height(8.dp))
+                current.checks.groupBy { it.group }.forEach { (group, checks) ->
+                    Text(group, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextPrimary,
+                        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                    checks.forEach { check -> DiagnosticRow(check) }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = { viewModel.runDiagnostics() },
+                    enabled = !running,
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentCyan),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("diagnostics_run_btn")
+                ) {
+                    Text(if (running) "Checking…" else if (report == null) "Run" else "Run again",
+                        color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+                report?.let { current ->
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("runcode_diagnostics", current.toText()))
+                    }) {
+                        Text("Copy", fontSize = 11.sp, color = AccentCyan)
+                    }
+                }
+                TextButton(onClick = {
+                    viewModel.logShareIntent()?.let { intent ->
+                        try {
+                            context.startActivity(intent)
+                        } catch (_: android.content.ActivityNotFoundException) {
+                        }
+                    }
+                }) {
+                    Text("Share logs", fontSize = 11.sp, color = AccentCyan)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticRow(check: DiagnosticCheck) {
+    val color = when (check.status) {
+        CheckStatus.PASS -> AccentGreen
+        CheckStatus.WARN -> Color(0xFFFFB300)
+        CheckStatus.FAIL -> AccentRed
+        CheckStatus.INFO -> TextMuted
+    }
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+        Text(
+            text = check.status.name,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = color,
+            modifier = Modifier.width(36.dp)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(check.name, fontSize = 11.sp, color = TextPrimary)
+            Text(check.detail, fontSize = 10.sp, color = TextSecondary, lineHeight = 13.sp)
+        }
+    }
+}
+
 @Composable
 private fun McpBridgeCard(viewModel: MainViewModel) {
     val context = LocalContext.current
@@ -431,6 +527,9 @@ private fun McpBridgeCard(viewModel: MainViewModel) {
                 )
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+            McpPublicUrlSection(viewModel)
+
             Spacer(modifier = Modifier.height(12.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -461,6 +560,93 @@ private fun McpBridgeCard(viewModel: MainViewModel) {
                 text = "${McpTools.descriptors().length()} tools: projects, files, services, logs, shell, Python and SQL. " +
                     "Point your MCP client at the endpoint above with header " +
                     "Authorization: Bearer <token>.",
+                fontSize = 10.sp,
+                color = TextMuted,
+                lineHeight = 14.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun McpPublicUrlSection(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    val enabled by viewModel.mcpPublic.collectAsState()
+    val tunnel by viewModel.mcpTunnelState.collectAsState()
+    val bridge by viewModel.mcpState.collectAsState()
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Public URL (internet)", fontSize = 12.sp, color = TextPrimary)
+            Text(
+                text = if (enabled) {
+                    "Anyone with the URL and token can run commands here. The relay sees the traffic."
+                } else {
+                    "HTTPS link through an SSH relay. Works behind NAT and with a VPN on."
+                },
+                fontSize = 10.sp,
+                color = if (enabled) Color(0xFFFFB300) else TextMuted
+            )
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = { viewModel.setMcpPublic(it) },
+            modifier = Modifier.testTag("mcp_public_switch")
+        )
+    }
+
+    if (!enabled) return
+    Spacer(modifier = Modifier.height(4.dp))
+
+    val status = when {
+        !bridge.isRunning -> "Starts with the bridge"
+        tunnel.status == TunnelStatus.ONLINE -> "Online via ${tunnel.provider}"
+        tunnel.status == TunnelStatus.CONNECTING -> "Connecting via ${tunnel.provider ?: "relay"}…"
+        tunnel.status == TunnelStatus.RETRYING -> "Retrying in ${tunnel.retryInSeconds}s"
+        else -> "Off"
+    }
+    HealthRow(label = "Tunnel", value = status)
+
+    val url = tunnel.url
+    if (tunnel.status == TunnelStatus.ONLINE && url != null) {
+        val endpoint = "$url/mcp"
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = endpoint,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = AccentGreen,
+                modifier = Modifier.weight(1f).testTag("mcp_public_url")
+            )
+            TextButton(onClick = {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("runcode_mcp_url", endpoint))
+            }) {
+                Text("Copy", fontSize = 11.sp, color = AccentCyan)
+            }
+        }
+        Text(
+            text = "Free relays give a new URL on every reconnect.",
+            fontSize = 10.sp,
+            color = TextMuted
+        )
+    } else if (tunnel.status != TunnelStatus.OFF) {
+        tunnel.lastError?.let {
+            Text(text = it, fontSize = 10.sp, color = AccentRed, lineHeight = 14.sp)
+            if (it.contains("host key")) {
+                TextButton(onClick = { viewModel.forgetRelayKeys() }) {
+                    Text("Forget relay keys", fontSize = 11.sp, color = AccentCyan)
+                }
+            }
+        }
+        if (tunnel.failures >= 2) {
+            Text(
+                text = "Check the internet connection. If a VPN is on, make sure runcode is not " +
+                    "excluded from it (split tunneling).",
                 fontSize = 10.sp,
                 color = TextMuted,
                 lineHeight = 14.sp

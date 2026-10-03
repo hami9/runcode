@@ -7,6 +7,7 @@ import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.storage.ProjectStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -67,18 +68,17 @@ class BackupManager(
         }
         val checksum = digest.digest().joinToString("") { "%02x".format(it) }
 
-        val manifestContent = """
-{
-  "version": 1,
-  "projectId": "${project.id}",
-  "projectName": "${project.name}",
-  "profileId": "${project.profile.id}",
-  "createdAt": $timestamp,
-  "fileCount": ${filesToInclude.size},
-  "totalSizeBytes": $totalBytes,
-  "checksum": "$checksum"
-}
-""".trimIndent()
+        // Built with JSONObject so a quote or backslash in the project name stays valid JSON.
+        val manifestContent = JSONObject()
+            .put("version", 1)
+            .put("projectId", project.id)
+            .put("projectName", project.name)
+            .put("profileId", project.profile.id)
+            .put("createdAt", timestamp)
+            .put("fileCount", filesToInclude.size)
+            .put("totalSizeBytes", totalBytes)
+            .put("checksum", checksum)
+            .toString(2)
 
         // Create the zip archive
         ZipOutputStream(BufferedOutputStream(FileOutputStream(backupFile))).use { zos ->
@@ -252,24 +252,16 @@ class BackupManager(
     }
 
     private fun parseManifest(json: String): BackupManifest {
-        // Simple robust JSON extractor without external dependency
-        val projectId = json.substringAfter("\"projectId\": \"").substringBefore("\"")
-        val projectName = json.substringAfter("\"projectName\": \"").substringBefore("\"")
-        val profileId = json.substringAfter("\"profileId\": \"").substringBefore("\"")
-        val createdAt = json.substringAfter("\"createdAt\": ").substringBefore(",").trim().toLongOrNull() ?: System.currentTimeMillis()
-        val fileCount = json.substringAfter("\"fileCount\": ").substringBefore(",").trim().toIntOrNull() ?: 0
-        val totalSizeBytes = json.substringAfter("\"totalSizeBytes\": ").substringBefore(",").trim().toLongOrNull() ?: 0L
-        val checksum = json.substringAfter("\"checksum\": \"").substringBefore("\"")
-
+        val manifest = JSONObject(json)
         return BackupManifest(
-            version = 1,
-            projectId = projectId,
-            projectName = projectName,
-            profileId = profileId,
-            createdAt = createdAt,
-            fileCount = fileCount,
-            totalSizeBytes = totalSizeBytes,
-            checksum = checksum
+            version = manifest.optInt("version", 1),
+            projectId = manifest.optString("projectId"),
+            projectName = manifest.optString("projectName"),
+            profileId = manifest.optString("profileId"),
+            createdAt = manifest.optLong("createdAt", System.currentTimeMillis()),
+            fileCount = manifest.optInt("fileCount", 0),
+            totalSizeBytes = manifest.optLong("totalSizeBytes", 0L),
+            checksum = manifest.optString("checksum")
         )
     }
 }

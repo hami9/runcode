@@ -27,8 +27,8 @@ android {
         applicationId = "com.runcode.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.4.0"
+        versionCode = 6
+        versionName = "1.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -108,6 +108,8 @@ chaquopy {
         pip {
             install("python-telegram-bot==21.9")
             install("requests==2.32.3")
+            // Pure-Python git for the Git screen; a native git binary cannot run on Android.
+            install("dulwich==1.2.15")
         }
     }
 }
@@ -135,7 +137,10 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // SSH client for the MCP bridge's public tunnel. Pure Java, no native code.
+    implementation("com.github.mwiede:jsch:2.28.7")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.apache.sshd:sshd-core:2.20.0")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }

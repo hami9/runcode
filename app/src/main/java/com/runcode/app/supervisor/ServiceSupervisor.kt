@@ -269,6 +269,20 @@ class ServiceSupervisor(
             val instance = _instances.value[project.id] ?: break
             if (instance.state == ServiceState.STOPPING || instance.state == ServiceState.STOPPED) break
 
+            if (!handle.restartable && handle.exitReason != ExitReason.STOPPED) {
+                // A debug run ended. Restarting it would run without the debugger.
+                val failed = handle.exitReason != ExitReason.COMPLETED
+                logManager.log(project.id, project.name, if (failed) LogLevel.WARN else LogLevel.SYSTEM,
+                    if (failed) "Debug run ended with an error; not restarted." else "Debug run finished.")
+                releaseService(project.id)
+                updateInstance(project.id) {
+                    it.copy(state = if (failed) ServiceState.FAILED else ServiceState.STOPPED,
+                        lastError = if (failed) "Debug run ended with an error" else null)
+                }
+                syncSystemState()
+                break
+            }
+
             when (handle.exitReason) {
                 ExitReason.STOPPED -> break
 

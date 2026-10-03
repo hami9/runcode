@@ -1,5 +1,6 @@
 package com.runcode.app.mcp
 
+import com.runcode.app.BuildConfig
 import com.runcode.app.domain.models.LogLevel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -213,7 +214,7 @@ class McpServer(
                     .put("capabilities", JSONObject().put("tools", JSONObject().put("listChanged", false)))
                     .put(
                         "serverInfo",
-                        JSONObject().put("name", "runcode").put("version", "1.0.0")
+                        JSONObject().put("name", "runcode").put("version", BuildConfig.VERSION_NAME)
                     )
                     .put("instructions", INSTRUCTIONS)
 
