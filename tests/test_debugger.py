@@ -222,6 +222,27 @@ class DebuggerTest(unittest.TestCase):
         evaluating.join(5)
         self.assertFalse(replies[0]["ok"])
 
+    def test_an_expression_is_interrupted_at_most_once(self):
+        thread = self.start({self.script: [3]})
+        self.listener.paused()
+        session = debugger._sessions[self.session]
+        replies = []
+        evaluating = threading.Thread(target=lambda: replies.append(json.loads(
+            debugger.evaluate(self.session, "sum(1 for _ in iter(int, 1))"))), daemon=True)
+        evaluating.start()
+        deadline = time.monotonic() + 5
+        while session.evaluating is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        with session.cond:
+            # A timeout and a stop racing for the same expression send one exception only;
+            # a second could land in _serve's handler and make the run end as failed.
+            self.assertTrue(session._interrupt_evaluation())
+            self.assertFalse(session._interrupt_evaluation())
+            self.assertTrue(json.loads(session.send("stop"))["ok"])
+        self.assertEqual("stopped", self.finish(thread)["outcome"])
+        evaluating.join(5)
+        self.assertFalse(replies[0]["ok"])
+
     def test_concurrent_evaluations_each_get_their_own_result(self):
         thread = self.start({self.helper: [3]})
         self.listener.paused()

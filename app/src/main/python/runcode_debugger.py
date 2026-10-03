@@ -68,6 +68,21 @@ class _EvalRequest:
         self.expression = expression
         self.result = None       # JSON reply, set once
         self.abandoned = False   # the caller stopped waiting
+        self.interrupted = False  # an _EvalCancelled was sent for it; at most one ever is
+
+
+def _checkpoint():
+    pass
+
+
+def _absorb_interrupt():
+    """
+    Lets an interrupt sent for an expression that finished anyway arrive here, inside _serve's
+    try. CPython raises a pending async exception at the next Python-level call, so the first
+    iteration normally takes it; the rest are a bound, not a wait.
+    """
+    for _ in range(1000):
+        _checkpoint()
 
 
 def _variables(namespace, globals_only=False):
@@ -181,10 +196,14 @@ class _Session(bdb.Bdb):
                 with self.cond:
                     self.evaluating = None
                     request.result = result
+                    late = request.interrupted
                     self.cond.notify_all()
+                if late:
+                    # Interrupted as it finished: take the exception here, not in the program.
+                    _absorb_interrupt()
             except _EvalCancelled:
-                # Only ever raised while an expression runs, and caught here even when it
-                # lands just after the expression returned.
+                # Sent at most once per expression, only while it runs, and absorbed above
+                # when it finishes first, so it never reaches the program.
                 with self.cond:
                     if self.evaluating is not None:
                         self.evaluating.result = _fail("The expression was interrupted.")
@@ -192,7 +211,13 @@ class _Session(bdb.Bdb):
                     self.cond.notify_all()
 
     def _interrupt_evaluation(self):
-        """Call with self.cond held, while self.evaluating is set."""
+        """
+        Call with self.cond held. Interrupts the running expression, at most once: a timeout
+        and a stop for the same expression must not send two exceptions.
+        """
+        request = self.evaluating
+        if request is None or request.interrupted:
+            return False
         set_async_exc, ctypes = runcode_runner._set_async_exc, runcode_runner.ctypes
         if set_async_exc is None or self.thread_ident is None:
             return False
@@ -201,7 +226,8 @@ class _Session(bdb.Bdb):
         if affected > 1:
             set_async_exc(ident, None)
             return False
-        return affected == 1
+        request.interrupted = affected == 1
+        return request.interrupted
 
     def _evaluate(self, frame, expression):
         try:
@@ -257,7 +283,7 @@ class _Session(bdb.Bdb):
             if any(kind != "eval" for kind, _ in self.requests):
                 return _fail("Another command is already waiting to run.")
             self.requests.append((command, None))
-            if command == "stop" and self.evaluating is not None:
+            if command == "stop":
                 # Do not make a stop wait for a slow expression.
                 self._interrupt_evaluation()
             self.cond.notify_all()
@@ -275,7 +301,7 @@ class _Session(bdb.Bdb):
                 return request.result
             # Late results are dropped with the request; a queued one is skipped.
             request.abandoned = True
-            interrupted = self.evaluating is request and self._interrupt_evaluation()
+            interrupted = self.evaluating is request and (request.interrupted or self._interrupt_evaluation())
         return _fail("The expression did not finish within %g seconds%s." % (
             timeout, " and was interrupted" if interrupted else ""))
 

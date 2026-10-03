@@ -29,6 +29,32 @@ class GitViewModelTest {
         assertTrue("Timed out waiting for: $what", condition())
     }
 
+    @Test fun `a view model clears only the unsaved-file marker it published`() {
+        val app = RuntimeEnvironment.getApplication() as RuncodeApp
+        val project = app.projectStorage.createProjectFromTemplate("VM marker", ProjectProfile.PYTHON_SCRIPT)
+        runBlocking { app.appMetaDatabase.insertOrUpdateProject(project) }
+        val model = MainViewModel(app)
+        await("projects") { model.projects.value.isNotEmpty() }
+        model.selectProject(project)
+        await("selection") { model.selectedProject.value?.id == project.id && model.editorContent.value.isNotEmpty() }
+        val onCleared = MainViewModel::class.java.getDeclaredMethod("onCleared").apply { isAccessible = true }
+
+        model.updateEditorContent("unsaved")
+        await("published") { app.unsavedEditorFile?.first == project.id }
+        // Another activity's view model published since: not ours to clear.
+        val other = "another-project" to "main.py"
+        app.unsavedEditorFile = other
+        onCleared.invoke(model)
+        assertSame(other, app.unsavedEditorFile)
+
+        model.saveCurrentFile()
+        await("saved") { !model.isDirty.value && app.unsavedEditorFile == null }
+        model.updateEditorContent("unsaved again")
+        await("published again") { app.unsavedEditorFile?.first == project.id }
+        onCleared.invoke(model)
+        assertNull("its own marker is cleared", app.unsavedEditorFile)
+    }
+
     @Test fun `initialise, commit, and refuse a pull over unsaved editor changes`() {
         val python = HostPythonGitBackend.find()
         assumeTrue("No Python with dulwich", python != null)

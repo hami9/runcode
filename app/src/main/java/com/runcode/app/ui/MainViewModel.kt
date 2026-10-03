@@ -78,6 +78,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isDirty = MutableStateFlow(false)
     val isDirty: StateFlow<Boolean> = _isDirty.asStateFlow()
 
+    /** What this view model last published, so it never clears another activity's marker. */
+    private var publishedUnsaved: Pair<String, String>? = null
+
     // Undo / Redo history for active file
     private val undoStack = ArrayDeque<String>()
     private val redoStack = ArrayDeque<String>()
@@ -192,12 +195,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             combine(_isDirty, _selectedProject, _activeTab) { dirty, project, tab ->
                 if (dirty && project != null && tab != null) project.id to tab else null
-            }.collect { app.unsavedEditorFile = it }
+            }.collect {
+                publishedUnsaved = it
+                app.unsavedEditorFile = it
+            }
         }
     }
 
     override fun onCleared() {
-        app.unsavedEditorFile = null
+        if (publishedUnsaved != null && app.unsavedEditorFile === publishedUnsaved) app.unsavedEditorFile = null
     }
 
     // ---------------------------------------------------------------- terminal
