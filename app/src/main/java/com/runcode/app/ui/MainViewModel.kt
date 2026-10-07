@@ -1,12 +1,16 @@
 package com.runcode.app.ui
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.runcode.app.RuncodeApp
+import com.runcode.app.backup.BackupFolderState
 import com.runcode.app.backup.BackupPreview
+import com.runcode.app.backup.StoredBackup
 import com.runcode.app.domain.models.DeviceCapabilities
 import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
@@ -14,7 +18,16 @@ import com.runcode.app.domain.models.QueryResult
 import com.runcode.app.domain.models.RuntimeEvent
 import com.runcode.app.domain.models.RuntimeInstance
 import com.runcode.app.domain.models.TableInfo
+import com.runcode.app.diagnostics.DiagnosticReport
+import com.runcode.app.git.GitCommit
+import com.runcode.app.git.GitIdentity
+import com.runcode.app.git.GitStatus
 import com.runcode.app.mcp.McpServerState
+import com.runcode.app.mcp.McpTunnelState
+import com.runcode.app.mcp.TofuHostKeys
+import com.runcode.app.mcp.TunnelStatus
+import com.runcode.app.runtime.DebugState
+import com.runcode.app.runtime.DebugStatus
 import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.settings.ProjectSettings
 import com.runcode.app.storage.EntryPointEffect
@@ -27,11 +40,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -60,6 +77,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isDirty = MutableStateFlow(false)
     val isDirty: StateFlow<Boolean> = _isDirty.asStateFlow()
+
+    /** What this view model last published, so it never clears another activity's marker. */
+    private var publishedUnsaved: Pair<String, String>? = null
 
     // Undo / Redo history for active file
     private val undoStack = ArrayDeque<String>()
@@ -91,6 +111,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _backupPreview = MutableStateFlow<BackupPreview?>(null)
     val backupPreview: StateFlow<BackupPreview?> = _backupPreview.asStateFlow()
 
+    val backupFolderState: StateFlow<BackupFolderState> = app.backupFolder.state
+
+    private val _folderBackups = MutableStateFlow<List<StoredBackup>>(emptyList())
+    val folderBackups: StateFlow<List<StoredBackup>> = _folderBackups.asStateFlow()
+
+    private val _folderBusy = MutableStateFlow(false)
+    val folderBusy: StateFlow<Boolean> = _folderBusy.asStateFlow()
+
     // System Health
     private val _capabilities = MutableStateFlow<DeviceCapabilities?>(null)
     val capabilities: StateFlow<DeviceCapabilities?> = _capabilities.asStateFlow()
@@ -109,6 +137,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _mcpAllowLan = MutableStateFlow(false)
     val mcpAllowLan: StateFlow<Boolean> = _mcpAllowLan.asStateFlow()
 
+    val mcpTunnelState: StateFlow<McpTunnelState> = app.mcpTunnel.state
+
+    // The tunnel outlives this view model, so read the switch back from it.
+    private val _mcpPublic = MutableStateFlow(app.mcpTunnel.state.value.status != TunnelStatus.OFF)
+    val mcpPublic: StateFlow<Boolean> = _mcpPublic.asStateFlow()
+
     /** Process-wide resource snapshot, refreshed alongside device capabilities. */
     private val _processStats = MutableStateFlow(ProcessStats())
     val processStats: StateFlow<ProcessStats> = _processStats.asStateFlow()
@@ -121,6 +155,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val threads: Int = 0
     )
 
+    /** Everything the Git screen shows for the selected project. */
+    data class GitUiState(
+        val projectId: String? = null,
+        val isRepository: Boolean = false,
+        val status: GitStatus? = null,
+        val branches: List<String> = emptyList(),
+        val log: List<GitCommit> = emptyList(),
+        val busy: String? = null,
+        val error: String? = null
+    )
+
+    private val _git = MutableStateFlow(GitUiState())
+    val git: StateFlow<GitUiState> = _git.asStateFlow()
+
+    private val _diagnostics = MutableStateFlow<DiagnosticReport?>(null)
+    val diagnostics: StateFlow<DiagnosticReport?> = _diagnostics.asStateFlow()
+
+    private val _diagnosticsRunning = MutableStateFlow(false)
+    val diagnosticsRunning: StateFlow<Boolean> = _diagnosticsRunning.asStateFlow()
+
     private val _lastCrash = MutableStateFlow(app.lastCrashReport())
     val lastCrash: StateFlow<String?> = _lastCrash.asStateFlow()
 
@@ -132,12 +186,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
 
     init {
+        viewModelScope.launch { app.debugger.state.collect { followDebugger(it) } }
         loadProjects()
         refreshCapabilities()
         viewModelScope.launch {
             app.projectChanges.collect { projectId -> onExternalProjectChange(projectId) }
         }
+        viewModelScope.launch {
+            combine(_isDirty, _selectedProject, _activeTab) { dirty, project, tab ->
+                if (dirty && project != null && tab != null) project.id to tab else null
+            }.collect { marker ->
+                if (marker == null) {
+                    releaseUnsavedMarker()
+                } else {
+                    publishedUnsaved = marker
+                    app.unsavedEditorFile = marker
+                }
+            }
+        }
     }
+
+    /** Withdraws this view model's marker, never one another activity's view model published since. */
+    private fun releaseUnsavedMarker() {
+        if (publishedUnsaved != null && app.unsavedEditorFile === publishedUnsaved) app.unsavedEditorFile = null
+        publishedUnsaved = null
+    }
+
+    override fun onCleared() = releaseUnsavedMarker()
 
     // ---------------------------------------------------------------- terminal
 
@@ -167,6 +242,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             app.mcpServer.stop()
             app.mcpServer.start(MCP_PORT, _mcpToken.value, allow)
             app.serviceSupervisor.setExternalHold(app.mcpServer.state.value.isRunning)
+            syncMcpTunnel()
         }
     }
 
@@ -180,9 +256,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _userMessage.value = state.lastError?.let { "MCP bridge failed: $it" }
                 ?: "MCP bridge listening on ${state.boundAddress}:${state.port}"
         }
+        syncMcpTunnel()
         // Hold the process in the foreground while the bridge is up, otherwise Android
         // reclaims it as soon as the user leaves the app and the client loses its server.
         app.serviceSupervisor.setExternalHold(app.mcpServer.state.value.isRunning)
+    }
+
+    fun setMcpPublic(enabled: Boolean) {
+        _mcpPublic.value = enabled
+        syncMcpTunnel()
+    }
+
+    /** For a relay that really did change its host key: trust the next key it presents. */
+    fun forgetRelayKeys() {
+        TofuHostKeys.forgetAll(app.tunnelHostKeys)
+        app.mcpTunnel.onNetworkChanged()
+        _userMessage.value = "Relay keys forgotten; the next ones will be trusted"
+    }
+
+    /** The tunnel forwards to the bridge, so it runs only while both are switched on. */
+    private fun syncMcpTunnel() {
+        if (_mcpPublic.value && app.mcpServer.state.value.isRunning) {
+            app.mcpTunnel.start(MCP_PORT)
+        } else {
+            app.mcpTunnel.stop()
+        }
     }
 
     fun regenerateMcpToken() {
@@ -190,12 +288,165 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (app.mcpServer.state.value.isRunning) {
             app.mcpServer.stop()
             app.mcpServer.start(MCP_PORT, _mcpToken.value, _mcpAllowLan.value)
+            syncMcpTunnel()
         }
         _userMessage.value = "New MCP token generated. Existing clients must be updated."
     }
 
     fun mcpLanAddress(): String = app.portManager.getLanIp()
 
+
+    // ---------------------------------------------------------------- git
+
+    val gitIdentity: GitIdentity get() = app.git.identity
+    val gitHasToken: Boolean get() = app.git.hasToken
+
+    fun refreshGit() {
+        val project = _selectedProject.value ?: run { _git.value = GitUiState(); return }
+        gitTask(project, null) { refreshGitState(project) }
+    }
+
+    private suspend fun refreshGitState(project: Project, error: String? = null) {
+        val git = app.git
+        if (!git.isRepository(project)) {
+            _git.value = GitUiState(projectId = project.id, error = error)
+            return
+        }
+        val status = git.status(project)
+        val (_, branches) = git.branches(project)
+        _git.value = GitUiState(project.id, true, status, branches, git.log(project), error = error)
+    }
+
+    fun gitInit() = gitAction("Initialising") { app.git.init(it); "Repository created on main" }
+
+    fun gitStageAll() = gitAction("Staging") { app.git.stage(it); null }
+
+    fun gitCommit(message: String, stageAll: Boolean) = gitAction("Committing") { project ->
+        if (stageAll) app.git.stage(project)
+        "Committed ${app.git.commit(project, message)}"
+    }
+
+    fun gitPush() = gitAction("Pushing") { app.git.push(it); "Pushed to origin" }
+
+    fun gitPull() = gitAction("Pulling", changesFiles = true) { project ->
+        val count = app.git.pull(project)
+        if (count == 0) "Already up to date" else "Pulled $count new commit(s)"
+    }
+
+    fun gitCheckout(branch: String, create: Boolean) = gitAction("Switching branch", changesFiles = true) { project ->
+        app.git.checkout(project, branch, create)
+        "On branch $branch"
+    }
+
+    fun gitSetRemote(url: String) = gitAction("Saving remote") { app.git.setRemote(it, url); "Remote saved" }
+
+    fun saveGitSettings(name: String, email: String, token: String?) {
+        app.git.identity = GitIdentity(name, email)
+        try {
+            token?.let { app.git.setToken(it) }
+            _userMessage.value = if (token?.isBlank() == true) "Git settings saved; token removed" else "Git settings saved"
+        } catch (e: Exception) {
+            _userMessage.value = e.message
+        }
+    }
+
+    /** Clones into a new project, saves it and opens it. */
+    fun gitClone(url: String) {
+        if (_git.value.busy != null) return
+        _git.value = _git.value.copy(busy = "Cloning", error = null)
+        viewModelScope.launch {
+            try {
+                val project = app.git.cloneProject(url)
+                app.appMetaDatabase.insertOrUpdateProject(project)
+                loadProjects()
+                selectProject(project)
+                _userMessage.value = "Cloned into '${project.name}'"
+                _git.value = GitUiState()
+                refreshGit()
+            } catch (e: Exception) {
+                _git.value = _git.value.copy(busy = null, error = e.message)
+            }
+        }
+    }
+
+    /**
+     * Runs a git operation on the selected project and refreshes the screen. Operations that
+     * rewrite files refuse while the editor has unsaved changes, which they would otherwise
+     * be silently overwritten by on the next save.
+     */
+    private fun gitAction(label: String, changesFiles: Boolean = false, block: suspend (Project) -> String?) {
+        val project = _selectedProject.value ?: return
+        if (changesFiles && _isDirty.value) {
+            _git.value = _git.value.copy(error = "Save the file open in the editor first.")
+            return
+        }
+        gitTask(project, label) {
+            val message = block(project)
+            if (changesFiles) app.notifyProjectChanged(project.id)
+            refreshGitState(project)
+            message?.let { _userMessage.value = it }
+        }
+    }
+
+    private fun gitTask(project: Project, label: String?, block: suspend () -> Unit) {
+        if (_git.value.busy != null) return
+        _git.value = _git.value.copy(projectId = project.id, busy = label ?: "Loading", error = null)
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: Exception) {
+                runCatching { refreshGitState(project, e.message ?: e.javaClass.simpleName) }
+                    .onFailure { _git.value = _git.value.copy(error = e.message) }
+            } finally {
+                _git.value = _git.value.copy(busy = null)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- diagnostics
+
+    fun runDiagnostics() {
+        if (_diagnosticsRunning.value) return
+        _diagnosticsRunning.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _diagnostics.value = app.diagnostics.run()
+            } catch (e: Exception) {
+                _userMessage.value = "Diagnostics failed: ${e.message}"
+            } finally {
+                _diagnosticsRunning.value = false
+            }
+        }
+    }
+
+    /**
+     * Writes the latest diagnostics report and every log line in memory to a shareable file.
+     * Secrets were already redacted when each line was logged.
+     */
+    fun logShareIntent(): Intent? {
+        return try {
+            val dir = File(app.cacheDir, "shared").apply { mkdirs() }
+            dir.listFiles()?.forEach { it.delete() }
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+            val file = File(dir, "runcode-logs-$stamp.txt")
+            file.writeText(buildString {
+                _diagnostics.value?.let { append(it.toText()).append("\n") }
+                append("---- logs ----\n")
+                append(app.logManager.exportLogs().ifEmpty { "(no log lines)\n" })
+            })
+            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", file)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "runcode logs $stamp")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            Intent.createChooser(send, "Share runcode logs")
+        } catch (e: Exception) {
+            _userMessage.value = "Could not prepare logs: ${e.message}"
+            null
+        }
+    }
 
     fun dismissCrashReport() {
         app.clearCrashReport()
@@ -723,6 +974,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ---------------------------------------------------------------- debugger
+
+    val debugState: StateFlow<DebugState> = app.debugger.state
+    val breakpoints: StateFlow<Map<String, Map<String, Set<Int>>>> = app.debugger.breakpoints
+
+    private val _debugEvalResult = MutableStateFlow<String?>(null)
+    val debugEvalResult: StateFlow<String?> = _debugEvalResult.asStateFlow()
+
+    /** Breakpoints live on Python files under source/; the key is the path below it. */
+    fun debugFileKey(tab: String?): String? =
+        tab?.takeIf { it.startsWith("source/") && it.endsWith(".py") }?.removePrefix("source/")
+
+    fun toggleBreakpoint(line: Int) {
+        val project = _selectedProject.value ?: return
+        val file = debugFileKey(_activeTab.value) ?: return
+        app.debugger.toggleBreakpoint(project.id, file, line)
+    }
+
+    /** Runs the project under the debugger; it stops at breakpoints in its Python files. */
+    fun debugProject(project: Project) {
+        if (project.profile == ProjectProfile.STATIC_WEB) {
+            _userMessage.value = "Static websites have no Python to debug."
+            return
+        }
+        viewModelScope.launch {
+            if (_isDirty.value && !persistCurrentFile(announce = false)) return@launch
+            _debugEvalResult.value = null
+            app.debugger.arm(project.id)
+            try {
+                if (!app.serviceSupervisor.startProject(project)) {
+                    _userMessage.value = "Could not start the debug run. Stop the running project first."
+                }
+            } finally {
+                app.debugger.disarm(project.id)
+            }
+        }
+    }
+
+    fun debugCommand(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            app.debugger.command(name)?.let { _userMessage.value = it }
+        }
+    }
+
+    fun debugEvaluate(expression: String) {
+        if (expression.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _debugEvalResult.value = app.debugger.evaluate(expression).fold(
+                onSuccess = { "$expression = $it" },
+                onFailure = { "$expression → ${it.message}" }
+            )
+        }
+    }
+
+    fun dismissDebug() = app.debugger.dismiss()
+
+    /** Shows the paused line: opens its file when the debugger stops in another one. */
+    private fun followDebugger(state: DebugState) {
+        if (state.status != DebugStatus.PAUSED) return
+        val project = _selectedProject.value ?: return
+        val file = state.file ?: return
+        if (state.projectId != project.id || file.startsWith("/")) return
+        val tab = "source/$file"
+        if (_activeTab.value != tab) openFile(project.id, tab)
+    }
+
     fun stopProject(projectId: String) {
         viewModelScope.launch {
             app.serviceSupervisor.stopProject(projectId)
@@ -808,6 +1125,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _userMessage.value = "Successfully restored project '${restored.name}'"
             } catch (e: Exception) {
                 _userMessage.value = "Restore failed: ${e.message}"
+            }
+        }
+    }
+
+    // Backup folder (Storage Access Framework)
+
+    fun chooseBackupFolder(uri: Uri) {
+        try {
+            app.backupFolder.choose(uri)
+            refreshFolderBackups()
+        } catch (e: SecurityException) {
+            _userMessage.value = "That folder cannot be kept across restarts. Pick another one."
+        }
+    }
+
+    fun forgetBackupFolder() {
+        app.backupFolder.clear()
+        _folderBackups.value = emptyList()
+    }
+
+    fun setAutoBackup(enabled: Boolean) {
+        app.backupFolder.setAutoEnabled(enabled)
+        if (enabled) viewModelScope.launch(Dispatchers.IO) { app.runAutoBackupIfDue(); refreshFolderBackups() }
+    }
+
+    fun refreshFolderBackups() {
+        val store = app.backupFolder.store() ?: run { _folderBackups.value = emptyList(); return }
+        folderTask("Cannot read the backup folder") {
+            _folderBackups.value = app.folderBackups.list(store)
+        }
+    }
+
+    fun backupToFolder(project: Project) {
+        val store = app.backupFolder.store() ?: return
+        folderTask("Backup to folder failed") {
+            val stored = app.folderBackups.export(store, project)
+            refreshBackups(project.id)
+            _folderBackups.value = app.folderBackups.list(store)
+            _userMessage.value = "Saved and verified ${stored.name} in ${app.backupFolder.state.value.label}"
+        }
+    }
+
+    fun verifyFolderBackup(backup: StoredBackup) {
+        val store = app.backupFolder.store() ?: return
+        folderTask("Verification failed") {
+            _backupPreview.value = app.folderBackups.verify(store, backup)
+        }
+    }
+
+    fun restoreFolderBackup(backup: StoredBackup) {
+        val store = app.backupFolder.store() ?: return
+        folderTask("Restore failed") {
+            val restored = app.folderBackups.restore(store, backup)
+            app.appMetaDatabase.insertOrUpdateProject(restored)
+            loadProjects()
+            withContext(Dispatchers.Main) { selectProject(restored) }
+            _userMessage.value = "Restored '${restored.name}' from ${backup.name}"
+        }
+    }
+
+    private fun folderTask(failure: String, block: suspend () -> Unit) {
+        if (_folderBusy.value) return
+        _folderBusy.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                block()
+            } catch (e: Exception) {
+                _userMessage.value = "$failure: ${e.message}"
+            } finally {
+                _folderBusy.value = false
             }
         }
     }

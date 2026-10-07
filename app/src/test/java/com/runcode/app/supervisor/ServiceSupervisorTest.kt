@@ -21,7 +21,11 @@ import org.robolectric.annotation.Config
 class ServiceSupervisorTest {
     private val project = Project("test", "Test", "", ProjectProfile.PYTHON_SCRIPT, "/test", "main.py")
 
-    private class Handle(var alive: Boolean = false, var reason: ExitReason = ExitReason.CRASHED) : RuntimeHandle {
+    private class Handle(
+        var alive: Boolean = false,
+        var reason: ExitReason = ExitReason.CRASHED,
+        override val restartable: Boolean = true
+    ) : RuntimeHandle {
         override val serviceId = "test"
         override val projectId = "test"
         override val isAlive get() = alive
@@ -47,6 +51,26 @@ class ServiceSupervisorTest {
     private fun TestScope.supervisor(engine: Engine): ServiceSupervisor {
         val context = RuntimeEnvironment.getApplication()
         return ServiceSupervisor(context, RuntimeRegistry(engine, engine), LogManager(context), PortManager(), backgroundScope)
+    }
+
+    @Test fun `a crashed debug run is not restarted, even with ALWAYS`() = runTest {
+        val engine = Engine(Handle(reason = ExitReason.CRASHED, restartable = false))
+        val supervisor = supervisor(engine)
+        supervisor.startProject(project.copy(restartPolicy = RestartPolicy.ALWAYS))
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(1, engine.starts)
+        assertEquals(ServiceState.FAILED, supervisor.instances.value[project.id]?.state)
+    }
+
+    @Test fun `a finished debug run stops cleanly`() = runTest {
+        val engine = Engine(Handle(reason = ExitReason.COMPLETED, restartable = false))
+        val supervisor = supervisor(engine)
+        supervisor.startProject(project.copy(restartPolicy = RestartPolicy.ALWAYS))
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(1, engine.starts)
+        assertEquals(ServiceState.STOPPED, supervisor.instances.value[project.id]?.state)
     }
 
     @Test fun `crashing services stop after four automatic retries`() = runTest {

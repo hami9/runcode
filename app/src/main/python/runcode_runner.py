@@ -156,18 +156,27 @@ def _fallback_tracer(service_id):
     return tracer
 
 
-def run_script(service_id, script_path, working_dir, env_pairs, sink):
+def run_script(service_id, script_path, working_dir, env_pairs, sink, executor=None):
+    """
+    Run a project script. [executor], when given, is called with the script path in place of
+    runpy.run_path; the debugger uses it to run the script under its trace hook while keeping
+    the environment, working directory, output routing and stop handling identical.
+    """
     # CPython's cwd, environment and import state are shared by all JVM threads. A
     # second script must not receive the first project's secrets or relative writes.
     if not _execution_lock.acquire(blocking=False):
         return "fatal:Another Python task is active. Stop it before starting this project."
     try:
-        return _run_script_locked(service_id, script_path, working_dir, env_pairs, sink)
+        return _run_script_locked(service_id, script_path, working_dir, env_pairs, sink, executor)
     finally:
         _execution_lock.release()
 
 
-def _run_script_locked(service_id, script_path, working_dir, env_pairs, sink):
+def _run_path(script_path):
+    runpy.run_path(script_path, run_name="__main__")
+
+
+def _run_script_locked(service_id, script_path, working_dir, env_pairs, sink, executor=None):
     """
     Execute `script_path` as __main__.
 
@@ -210,13 +219,17 @@ def _run_script_locked(service_id, script_path, working_dir, env_pairs, sink):
 
         sys.argv = [script_path]
 
-        if using_fallback:
-            sys.settrace(_fallback_tracer(service_id))
-        try:
-            runpy.run_path(script_path, run_name="__main__")
-        finally:
+        if executor is not None:
+            # The debugger owns the trace hook for the whole run.
+            executor(script_path)
+        else:
             if using_fallback:
-                sys.settrace(None)
+                sys.settrace(_fallback_tracer(service_id))
+            try:
+                _run_path(script_path)
+            finally:
+                if using_fallback:
+                    sys.settrace(None)
 
         return "completed"
 

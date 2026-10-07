@@ -97,6 +97,10 @@ class ProjectArchive(
         }
     }
 
+    /** A project around files already placed in [id]'s source/, such as a git clone. */
+    fun projectForSource(id: String, name: String, description: String): Project =
+        buildProject(id, storage.getProjectDir(id), null, name).copy(description = description)
+
     private fun buildProject(id: String, root: File, manifest: JSONObject?, fallbackName: String): Project {
         val sourceDir = storage.getSourceDir(id)
         val entryPoint = detectEntryPoint(sourceDir, manifest?.optString("entry_point"))

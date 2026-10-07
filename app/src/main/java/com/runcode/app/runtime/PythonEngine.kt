@@ -11,6 +11,7 @@ import com.runcode.app.security.SecretStore
 import com.runcode.app.system.ProcessMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -27,7 +28,8 @@ import java.util.concurrent.atomic.AtomicReference
 class PythonEngine(
     private val context: Context,
     private val secretStore: SecretStore,
-    private val monitor: ProcessMonitor
+    private val monitor: ProcessMonitor,
+    private val debugger: PythonDebugger? = null
 ) : RuntimeEngine {
 
     override val descriptor = RuntimeDescriptor(
@@ -102,6 +104,10 @@ class PythonEngine(
         }
         sink.onEvent(LogLevel.SYSTEM, "Entrypoint: ${project.entryPoint} (${scriptFile.length()} bytes)")
 
+        // Non-null when this start was armed as a debug run: the breakpoints to begin with.
+        val debugBreakpoints = debugger?.takeLaunch(project.id, handleServiceId, File(project.projectRoot, "source"))
+        if (debugBreakpoints != null) sink.onEvent(LogLevel.SYSTEM, "Debugging: the script stops at breakpoints.")
+
         val alive = AtomicBoolean(true)
         val reason = AtomicReference(ExitReason.RUNNING)
         // The Linux tid is only knowable from inside the thread itself.
@@ -125,18 +131,35 @@ class PythonEngine(
                 "fatal:the embedded Python bridge could not be loaded"
             } else {
                 try {
-                    runner.callAttr(
-                        "run_script",
-                        handleServiceId,
-                        scriptFile.absolutePath,
-                        workingDir,
-                        envPairs.toTypedArray(),
-                        OutputSink(sink)
-                    ).toString()
+                    if (debugBreakpoints != null) {
+                        Python.getInstance().getModule(DEBUGGER_MODULE).callAttr(
+                            "debug_script",
+                            handleServiceId,
+                            scriptFile.absolutePath,
+                            workingDir,
+                            envPairs.toTypedArray(),
+                            OutputSink(sink),
+                            debugger!!.listener(project.id),
+                            debugBreakpoints
+                        ).toString()
+                    } else {
+                        runner.callAttr(
+                            "run_script",
+                            handleServiceId,
+                            scriptFile.absolutePath,
+                            workingDir,
+                            envPairs.toTypedArray(),
+                            OutputSink(sink)
+                        ).toString()
+                    }
                 } catch (e: Throwable) {
                     sink.onEvent(LogLevel.STDERR, "${e.javaClass.simpleName}: ${e.message}")
                     "failed:${e.javaClass.simpleName}"
                 }
+            }
+            // The Python side reports the end itself; this covers a bridge that never ran.
+            if (debugBreakpoints != null && debugger?.isActive == true) {
+                debugger.listener(project.id).onState(JSONObject().put("status", "finished").put("outcome", outcome).toString())
             }
 
             when (outcome) {
@@ -170,6 +193,7 @@ class PythonEngine(
             override val boundPort = project.network.port
             override val exitReason get() = reason.get()
             override val threadId get() = workerTid.get()
+            override val restartable = debugBreakpoints == null
 
             override suspend fun stop() = withContext(Dispatchers.IO) {
                 if (!alive.get()) return@withContext
@@ -216,6 +240,7 @@ class PythonEngine(
 
     companion object {
         private const val RUNNER_MODULE = "runcode_runner"
+        private const val DEBUGGER_MODULE = "runcode_debugger"
         private const val STOP_GRACE_MS = 3000L
 
         /** Starts the interpreter once per process. Safe to call repeatedly. */

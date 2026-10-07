@@ -31,6 +31,11 @@ class RuntimeForegroundService : Service() {
         const val ACTION_STOP_ALL = "com.runcode.app.action.STOP_ALL"
         const val EXTRA_RUNNING_COUNT = "extra_running_count"
         const val EXTRA_BRIDGE_ACTIVE = "extra_bridge_active"
+
+        /** Whether startForeground() last succeeded. Diagnostics reports this, not the intent. */
+        @Volatile
+        var isInForeground: Boolean = false
+            private set
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -73,6 +78,7 @@ class RuntimeForegroundService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            isInForeground = true
         } catch (_: Exception) {
             // e.g. ForegroundServiceStartNotAllowedException when the app is in the background.
             // The runtimes keep going; we just cannot show the ongoing notification.
@@ -80,11 +86,13 @@ class RuntimeForegroundService : Service() {
     }
 
     private fun shutdown() {
+        isInForeground = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
+        isInForeground = false
         serviceScope.cancel()
         super.onDestroy()
     }

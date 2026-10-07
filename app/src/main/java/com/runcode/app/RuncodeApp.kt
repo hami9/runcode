@@ -1,16 +1,30 @@
 package com.runcode.app
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
+import androidx.annotation.VisibleForTesting
 import com.chaquo.python.Python
+import com.runcode.app.backup.BackupFolderSettings
 import com.runcode.app.backup.BackupManager
+import com.runcode.app.backup.FolderBackups
 import com.runcode.app.database.AppMetaDatabase
 import com.runcode.app.database.ProjectDatabaseManager
+import com.runcode.app.diagnostics.DiagnosticsRunner
+import com.runcode.app.git.ChaquopyGitBackend
+import com.runcode.app.git.GitBackend
+import com.runcode.app.git.GitManager
 import com.runcode.app.domain.models.LogLevel
+import com.runcode.app.domain.models.Project
 import com.runcode.app.domain.models.ProjectProfile
 import com.runcode.app.logging.LogManager
 import com.runcode.app.mcp.McpServer
 import com.runcode.app.mcp.McpToolHost
+import com.runcode.app.mcp.McpTunnel
+import com.runcode.app.mcp.SshTunnelConnector
 import com.runcode.app.network.PortManager
+import com.runcode.app.runtime.ChaquopyDebugBridge
+import com.runcode.app.runtime.PythonDebugger
 import com.runcode.app.runtime.PythonEngine
 import com.runcode.app.runtime.RuntimeRegistry
 import com.runcode.app.runtime.StaticWebEngine
@@ -23,11 +37,15 @@ import com.runcode.app.system.CompatibilityManager
 import com.runcode.app.system.CrashReporter
 import com.runcode.app.system.ProcessMonitor
 import com.runcode.app.terminal.TerminalSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.security.SecureRandom
 
@@ -47,6 +65,10 @@ class RuncodeApp : Application() {
         private set
     lateinit var backupManager: BackupManager
         private set
+    lateinit var backupFolder: BackupFolderSettings
+        private set
+    lateinit var folderBackups: FolderBackups
+        private set
     lateinit var compatibilityManager: CompatibilityManager
         private set
     lateinit var runtimeRegistry: RuntimeRegistry
@@ -57,6 +79,23 @@ class RuncodeApp : Application() {
         private set
     lateinit var mcpServer: McpServer
         private set
+    lateinit var mcpTunnel: McpTunnel
+        private set
+    lateinit var debugger: PythonDebugger
+        private set
+
+    /** Host keys of the tunnel relays, trusted on first use. */
+    val tunnelHostKeys: File get() = File(filesDir, "tunnel_known_hosts")
+
+    val diagnostics: DiagnosticsRunner by lazy { DiagnosticsRunner(this) }
+
+    /** Tests swap this for the host's Python before first use of [git]. */
+    @VisibleForTesting
+    var gitBackend: GitBackend = ChaquopyGitBackend()
+
+    val git: GitManager by lazy {
+        GitManager(gitBackend, projectStorage, projectArchive, secretStore, getSharedPreferences("git", MODE_PRIVATE))
+    }
     lateinit var processMonitor: ProcessMonitor
         private set
     lateinit var projectArchive: ProjectArchive
@@ -72,8 +111,20 @@ class RuncodeApp : Application() {
      */
     val projectChanges: SharedFlow<String> = _projectChanges
 
+    /** Something other than the editor rewrote a project's files (MCP, git pull, checkout). */
+    fun notifyProjectChanged(projectId: String) {
+        _projectChanges.tryEmit(projectId)
+    }
+
     var isPythonAvailable: Boolean = false
         private set
+
+    /**
+     * The project id and path of the file the editor holds unsaved changes to, kept current by
+     * the view model, so the MCP bridge can refuse to rewrite files under those changes.
+     */
+    @Volatile
+    var unsavedEditorFile: Pair<String, String>? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -89,6 +140,8 @@ class RuncodeApp : Application() {
         appMetaDatabase = AppMetaDatabase(this)
         projectDatabaseManager = ProjectDatabaseManager()
         backupManager = BackupManager(this, projectStorage)
+        backupFolder = BackupFolderSettings(this)
+        folderBackups = FolderBackups(backupManager, cacheDir)
         projectArchive = ProjectArchive(this, projectStorage)
         compatibilityManager = CompatibilityManager(this)
         terminalSession = TerminalSession(this)
@@ -97,7 +150,8 @@ class RuncodeApp : Application() {
         // The embedded CPython has to be started once per process, before any engine uses it.
         isPythonAvailable = PythonEngine.ensureStarted(this)
 
-        val pythonEngine = PythonEngine(this, secretStore, processMonitor)
+        debugger = PythonDebugger(ChaquopyDebugBridge())
+        val pythonEngine = PythonEngine(this, secretStore, processMonitor, debugger)
         val staticWebEngine = StaticWebEngine(portManager, processMonitor)
         runtimeRegistry = RuntimeRegistry(pythonEngine, staticWebEngine)
 
@@ -125,13 +179,30 @@ class RuncodeApp : Application() {
                 terminalSession = terminalSession,
                 runPython = ::runPythonSnippet,
                 projectSettings = projectSettings,
-                onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) }
+                onProjectChanged = { projectId -> _projectChanges.tryEmit(projectId) },
+                runDiagnostics = { diagnostics.run().toText() },
+                backupProject = ::backupProjectForMcp,
+                git = { git },
+                debugger = debugger,
+                unsavedEditorFile = { projectId -> unsavedEditorFile?.takeIf { it.first == projectId }?.second }
             ),
             onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
         )
+        mcpTunnel = McpTunnel(
+            connector = SshTunnelConnector(tunnelHostKeys),
+            onLog = { level, message -> logManager.log(MCP_LOG_ID, "MCP Bridge", level, message) }
+        )
+        watchDefaultNetwork()
 
         CoroutineScope(Dispatchers.IO).launch {
             seedStarterProjectsIfEmpty()
+        }
+        // Daily backups only happen while the process is alive; the switch in the UI says so.
+        CoroutineScope(Dispatchers.IO).launch {
+            while (true) {
+                runAutoBackupIfDue()
+                delay(AUTO_BACKUP_CHECK_MS)
+            }
         }
     }
 
@@ -152,6 +223,66 @@ class RuncodeApp : Application() {
     fun regenerateMcpToken(): String {
         secretStore.removeSecret(MCP_TOKEN_KEY)
         return mcpToken()
+    }
+
+    private suspend fun backupProjectForMcp(project: Project, toFolder: Boolean): String {
+        if (!toFolder) {
+            val file = backupManager.createProjectBackup(project)
+            return "Created ${file.name} (${file.length()} bytes) in the project's backups/ folder."
+        }
+        val store = backupFolder.store()
+            ?: throw IllegalStateException("No backup folder is chosen. Pick one under Backups in the app.")
+        val stored = folderBackups.export(store, project)
+        return "Created a local backup and copied it to ${backupFolder.state.value.label} as ${stored.name}; the copy was read back and verified."
+    }
+
+    private val autoBackupLock = Mutex()
+
+    /** Backs every project up to the chosen folder when the daily run is switched on and due. */
+    suspend fun runAutoBackupIfDue() = autoBackupLock.withLock {
+        // Checked under the lock: the hourly loop and the Backups switch can both find a run
+        // due, and only the first may do it.
+        val now = System.currentTimeMillis()
+        if (!backupFolder.isAutoDue(now)) return@withLock
+        // Never throws: it runs in an endless loop and from the UI, and one failure must not
+        // end daily backups or crash the app.
+        val result = try {
+            val store = backupFolder.store()
+            if (store == null) {
+                "Skipped: the backup folder is no longer accessible. Choose it again."
+            } else {
+                val projects = appMetaDatabase.getAllProjects()
+                val (done, error) = folderBackups.exportAll(store, projects)
+                if (error == null) "Backed up $done project(s)" else "Backed up $done of ${projects.size}. $error"
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            "Failed: ${e.message ?: e.javaClass.simpleName}"
+        }
+        backupFolder.recordAutoRun(now, result)
+        logManager.log(BACKUP_LOG_ID, "Backups", LogLevel.SYSTEM, "Automatic backup: $result")
+    }
+
+    /**
+     * Reconnects the public tunnel when the default network changes, e.g. Wi-Fi to mobile
+     * data or a VPN coming up or reconnecting, instead of waiting for keepalives to time out.
+     */
+    private fun watchDefaultNetwork() {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return
+        try {
+            connectivity.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+                // The first call reports the network at registration, not a change.
+                private var registered = false
+
+                override fun onAvailable(network: Network) {
+                    if (registered) mcpTunnel.onNetworkChanged()
+                    registered = true
+                }
+            })
+        } catch (e: RuntimeException) {
+            logManager.log(MCP_LOG_ID, "MCP Bridge", LogLevel.WARN, "Network changes are not tracked: ${e.message}")
+        }
     }
 
     private fun runPythonSnippet(code: String, workingDir: File): String {
@@ -188,5 +319,7 @@ class RuncodeApp : Application() {
     private companion object {
         const val MCP_TOKEN_KEY = "MCP_BRIDGE_TOKEN"
         const val MCP_LOG_ID = "__mcp__"
+        const val BACKUP_LOG_ID = "__backup__"
+        const val AUTO_BACKUP_CHECK_MS = 60L * 60L * 1000L
     }
 }

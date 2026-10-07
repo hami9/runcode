@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
@@ -56,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.runcode.app.domain.models.LogLevel
+import com.runcode.app.runtime.DebugStatus
 import com.runcode.app.ui.MainViewModel
 import com.runcode.app.ui.theme.AccentCyan
 import com.runcode.app.ui.theme.AccentGreen
@@ -82,6 +84,8 @@ fun EditorScreen(
     val projectFiles by viewModel.projectFiles.collectAsState()
     val instances by viewModel.instances.collectAsState()
     val logs by viewModel.logs.collectAsState()
+    val debugState by viewModel.debugState.collectAsState()
+    val breakpointMap by viewModel.breakpoints.collectAsState()
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -182,6 +186,15 @@ fun EditorScreen(
                                 Text("Stop", color = AccentRed)
                             }
                         } else {
+                            IconButton(
+                                onClick = {
+                                    viewModel.debugProject(currentProj)
+                                    showBottomConsole = true
+                                },
+                                modifier = Modifier.size(40.dp).testTag("editor_debug_btn")
+                            ) {
+                                Icon(Icons.Default.BugReport, contentDescription = "Debug", tint = AccentCyan, modifier = Modifier.size(20.dp))
+                            }
                             Button(
                                 onClick = {
                                     viewModel.runProject(currentProj)
@@ -258,17 +271,28 @@ fun EditorScreen(
                     .background(DarkBg)
             ) {
                 if (activeTab != null) {
+                    val debugFile = viewModel.debugFileKey(activeTab)
+                    val projectId = project?.id
                     CodeEditor(
                         documentKey = activeTab ?: "",
                         content = viewModel.editorContent,
                         onContentChange = viewModel::updateEditorContent,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        breakpoints = debugFile?.let { breakpointMap[projectId]?.get(it) }.orEmpty(),
+                        pausedLine = debugState.line.takeIf {
+                            debugState.status == DebugStatus.PAUSED && debugState.projectId == projectId && debugState.file == debugFile
+                        },
+                        onLineNumberTap = if (debugFile != null) viewModel::toggleBreakpoint else null
                     )
                 } else {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("No file open. Tap the folder icon (top left) to browse files.", color = TextMuted)
                     }
                 }
+            }
+
+            if (debugState.projectId == project?.id && debugState.status != DebugStatus.IDLE) {
+                DebugPanel(viewModel, debugState, modifier = Modifier.fillMaxWidth())
             }
 
             // Bottom Collapsible Console Drawer
