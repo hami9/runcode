@@ -1,0 +1,147 @@
+name: Android Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/build.gradle.kts'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, verify, and publish signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Read app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid or missing versionName in app/build.gradle.kts"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
+
+      - name: Reject duplicate release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; update versionName before publishing another version."
+            exit 1
+          fi
+          if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists."
+            exit 1
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up CPython 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare existing release signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.RUNCODE_KEYSTORE_BASE64 }}
+          RUNCODE_KEYSTORE_PASSWORD: ${{ secrets.RUNCODE_KEYSTORE_PASSWORD }}
+          RUNCODE_KEY_ALIAS: ${{ secrets.RUNCODE_KEY_ALIAS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$KEYSTORE_B64" || -z "$RUNCODE_KEYSTORE_PASSWORD" || -z "$RUNCODE_KEY_ALIAS" ]]; then
+            echo "::error::Missing required signing secrets: RUNCODE_KEYSTORE_BASE64, RUNCODE_KEYSTORE_PASSWORD, RUNCODE_KEY_ALIAS."
+            echo "::error::Use the SAME keystore as v1.4.0 so the installed app can be updated without uninstalling."
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/runcode-release.keystore"
+          test -s "$RUNNER_TEMP/runcode-release.keystore"
+          echo "RUNCODE_KEYSTORE=$RUNNER_TEMP/runcode-release.keystore" >> "$GITHUB_ENV"
+
+      - name: Run tests and build signed release
+        env:
+          RUNCODE_KEYSTORE_PASSWORD: ${{ secrets.RUNCODE_KEYSTORE_PASSWORD }}
+          RUNCODE_KEY_ALIAS: ${{ secrets.RUNCODE_KEY_ALIAS }}
+          RUNCODE_KEY_PASSWORD: ${{ secrets.RUNCODE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -v
+          chmod +x gradlew
+          RUNCODE_BUILD_PYTHON="$(command -v python)" ./gradlew testDebugUnitTest lintDebug assembleRelease --console=plain
+
+      - name: Verify APK signature and update compatibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -s "$APK"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+          # For v1.5.0 ensure the signing identity matches the publicly released v1.4.0 APK.
+          if [[ "$VERSION" == "1.5.0" ]]; then
+            mkdir -p "$RUNNER_TEMP/previous"
+            gh release download v1.4.0 --pattern 'runcode-v1.4.0.apk' --dir "$RUNNER_TEMP/previous"
+            OLD_CERT=$("$APKSIGNER" verify --print-certs "$RUNNER_TEMP/previous/runcode-v1.4.0.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)
+            NEW_CERT=$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)
+            if [[ -z "$OLD_CERT" || -z "$NEW_CERT" || "$OLD_CERT" != "$NEW_CERT" ]]; then
+              echo "::error::Signing certificate does not match v1.4.0. Refusing to publish an APK that would break in-place upgrades."
+              exit 1
+            fi
+          fi
+
+          mkdir -p dist
+          cp "$APK" "dist/runcode-$TAG.apk"
+          (cd dist && sha256sum "runcode-$TAG.apk" > SHA256SUMS.txt)
+
+      - name: Preserve signed APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk-${{ env.TAG }}
+          path: |
+            dist/runcode-${{ env.TAG }}.apk
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" "dist/runcode-$TAG.apk" dist/SHA256SUMS.txt --target "$GITHUB_SHA" --title "runcode $TAG" --generate-notes
